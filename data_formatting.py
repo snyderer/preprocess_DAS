@@ -82,19 +82,23 @@ def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
     else:
         raise ValueError('output_format must be "fk" or "tx"')
 
-def create_fk_mask(nx, ns, dx, fs, cs_min=1400, cp_min=1480, cp_max=6800, cs_max=7000, return_half = True):
+def create_fk_mask(shape, dx, fs, cs_min=1400, cp_min=1480, cp_max=6800, cs_max=7000, return_half = True):
     """
     create an fk filter mask using das4whales
+
     Parameters:
     -----------
-    nx = number of spatial samples
-    ns = number of time samples
-    dx = spatial distance
-    fs = sampling rate
-    cs_min, cp_min, cp_max, cs_max = range of expected soundspeeds
-    return_half = True to return only positive frequencies
+    nx : number of spatial samples
+    ns : number of time samples
+    dx : spatial distance
+    fs : sampling rate
+    cs_min, cp_min, cp_max, cs_max : range of expected soundspeeds
+    return_half : True to return only positive frequencies
+
+    Returns:
+    fk_mask : mask to be applied to F-K data
     """
-    fk_mask = dw.dsp.fk_filter_design((nx, ns), [0, nx-1, 1], dx, fs, cs_min=cs_min, cp_min=cp_min,
+    fk_mask = dw.dsp.fk_filter_design(shape, [0, shape[0]-1, 1], dx, fs, cs_min=cs_min, cp_min=cp_min,
                                     cp_max=cp_max, cs_max=cs_max)
     if return_half:
         fk_mask = fk_mask[:, ns//2-1:]
@@ -138,7 +142,7 @@ def dehydrate_fk(fk_data, mask):
     
     return fk_dehyd, nonzeros, (nx, nt)
 
-def rehydrate_fk(fk_dehyd, nonzeros, original_shape, return_format='tx'):
+def rehydrate(fk_dehyd, nonzeros, original_shape, return_format='tx'):
     """
     Rehydrate f-k domain data back to full representation.
     
