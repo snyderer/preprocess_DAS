@@ -12,10 +12,9 @@ from pathlib import Path
 import h5py
 import das4whales as dw
 
-
 class Loader:
     """
-    DAS data loader class using DAS4Whales for consistent data access.
+    DAS data loader class using DAS4Whales basic load function for consistent data access.
     
     This class handles initialization of metadata and provides iteration over
     a directory of DAS files with consistent preprocessing.
@@ -55,9 +54,6 @@ class Loader:
         self.end_file_index = end_file_index
         self.bandpass_filter = bandpass_filter
         
-        if dw is None:
-            raise ImportError("DAS4Whales is required for the Loader class")
-        
         # Get file list
         self._get_file_list()
         
@@ -70,8 +66,13 @@ class Loader:
         # Create bandpass filter if specified
         self._setup_filter()
         
-        # Initialize iterative loader
-        self._initialize_loader()
+        # Initialize iteration state
+        self.current_file_index = 0
+        self.current_data = None
+        self.current_time_axis = None
+        self.current_dist_axis = None
+        self.current_file_timestamp = None
+        self.current_time_position = 0  # Position within current file (seconds)
         
         print(f"Loader initialized:")
         print(f"  Files: {len(self.file_list)} ({self.start_file_index} to {self.end_file_index})")
@@ -116,22 +117,22 @@ class Loader:
         """Set up channel selection"""
         nx = self.metadata['nx']
         dx = self.metadata['dx']
-        total_length = nx*dx
+        total_length = nx * dx
 
-        if start_distance_km<0:
-            start_distance_km = total_length/1000 + start_distance_km
-        start_channel = max([int(np.floor(start_distance_km*1000/dx)), 0])
+        if start_distance_km < 0:
+            start_distance_km = total_length / 1000 + start_distance_km
+        start_channel = max([int(np.floor(start_distance_km * 1000 / dx)), 0])
 
-        if dx_in_m == None or dx_in_m <= self.metadata['dx']:
+        if dx_in_m is None or dx_in_m <= self.metadata['dx']:
             step = 1
         else:
-            step = int(np.floor(dx_in_m/self.metadata['dx']))
+            step = int(np.floor(dx_in_m / self.metadata['dx']))
 
-        num_channels = int(np.ceil(cable_span_km*1000/dx))
+        num_channels = int(np.ceil(cable_span_km * 1000 / dx))
         end_channel = start_channel + num_channels
 
         if end_channel > nx:
-            start_channel = nx-num_channels
+            start_channel = nx - num_channels
             end_channel = nx
 
         self.selected_channels = [start_channel, end_channel, step]
@@ -149,53 +150,110 @@ class Loader:
             except Exception as e:
                 print(f"Warning: Failed to create filter {self.bandpass_filter}: {e}")
     
-    def _initialize_loader(self):
-        """Initialize DAS4Whales iterative loader"""
+    def _load_file_data(self, file_index):
+        """Load data from a specific file"""
+        if file_index >= len(self.file_list):
+            return False
+        
+        file_path = self.file_list[file_index]
+        
         try:
-            self.das_loader = dw.data_handle.iterative_loader(
-                str(self.input_dir),
+            trace, tx, dist, timestamp = dw.data_handle.load_das_data(
+                file_path,
                 self.selected_channels,
-                metadata=self.metadata,
-                interrogator=self.interrogator,
-                start_file_index=0,  # File indexing already handled
-                time_window_s=self.time_window_s
+                self.metadata,
+                self.interrogator
             )
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize DAS4Whales loader: {e}")
-    
-    def __iter__(self):
-        """Make the loader iterable"""
-        return self
-    
-    def __next__(self):
-        """Get next data chunk"""
-        try:
-            # Get data from DAS4Whales loader
-            trace, tx, dist, timestamp = next(self.das_loader)
             
             # Apply bandpass filter if specified
             if self.filter_sos is not None:
                 import scipy.signal as sp
                 trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
             
-            # Create chunk info
-            chunk_info = {
-                'trace': trace,
-                'time_axis': tx,
-                'distance_axis': dist,
-                'timestamp': timestamp,
-                'shape': trace.shape,
-                'duration': tx[-1] - tx[0] if len(tx) > 0 else 0,
-                'channels': self.selected_channels,
-                'filtered': self.filter_sos is not None
-            }
+            self.current_data = trace
+            self.current_time_axis = tx
+            self.current_dist_axis = dist
+            self.current_file_timestamp = timestamp
+            self.current_time_position = 0
             
-            return chunk_info
+            return True
             
-        except StopIteration:
-            raise StopIteration("No more data chunks available")
         except Exception as e:
-            raise RuntimeError(f"Error loading next chunk: {e}")
+            print(f"Error loading file {file_path}: {e}")
+            return False
+    
+    def _get_next_chunk(self):
+        """Extract next time chunk from current data"""
+        if self.current_data is None:
+            return None
+        
+        dt = 1.0 / self.metadata['fs']
+        samples_per_window = int(self.time_window_s * self.metadata['fs'])
+        
+        # Calculate start and end sample indices
+        start_sample = int(self.current_time_position * self.metadata['fs'])
+        end_sample = start_sample + samples_per_window
+        
+        # Check if we have enough data in current file
+        if start_sample >= self.current_data.shape[1]:
+            return None  # No more data in this file
+        
+        # Adjust end sample if it exceeds available data
+        end_sample = min(end_sample, self.current_data.shape[1])
+        
+        # Extract chunk
+        trace_chunk = self.current_data[:, start_sample:end_sample]
+        time_chunk = self.current_time_axis[start_sample:end_sample] 
+        
+        # Calculate chunk timestamp (file timestamp + time offset)
+        chunk_timestamp = self.current_file_timestamp + pd.Timedelta(seconds=self.current_time_position)
+        
+        # Update position for next chunk
+        self.current_time_position += self.time_window_s
+        
+        return {
+            'trace': trace_chunk,
+            'time_axis': time_chunk,
+            'distance_axis': self.current_dist_axis,
+            'timestamp': chunk_timestamp,
+            'shape': trace_chunk.shape,
+            'duration': time_chunk[-1] - time_chunk[0] if len(time_chunk) > 0 else 0,
+            'channels': self.selected_channels,
+            'filtered': self.filter_sos is not None
+        }
+    
+    def __iter__(self):
+        """Make the loader iterable"""
+        # Reset to beginning
+        self.current_file_index = 0
+        self.current_data = None
+        self.current_time_position = 0
+        return self
+    
+    def __next__(self):
+        """Get next data chunk"""
+        while self.current_file_index < len(self.file_list):
+            # Load current file if not already loaded
+            if self.current_data is None:
+                success = self._load_file_data(self.current_file_index)
+                if not success:
+                    # Skip to next file
+                    self.current_file_index += 1
+                    continue
+            
+            # Try to get next chunk from current file
+            chunk = self._get_next_chunk()
+            
+            if chunk is not None:
+                return chunk
+            else:
+                # No more chunks in current file, move to next file
+                self.current_file_index += 1
+                self.current_data = None
+                self.current_time_position = 0
+        
+        # No more files to process
+        raise StopIteration("No more data chunks available")
     
     def get_file_timestamps(self, method='first_only'):
         """
@@ -226,7 +284,6 @@ class Loader:
                 )
                 
                 # Estimate file duration
-                
                 file_duration_s = self.metadata['ns'] / self.metadata['fs']
                 
                 # Calculate timestamps
@@ -241,9 +298,14 @@ class Loader:
         elif method == 'all':
             # Load from every file (slow but accurate)
             print("Loading timestamps from all files (this may take time)...")
-            for i, file_path in enumerate(self.file_list):
+            for file_path in self.file_list:
                 try:
-                    timestamp = dw.data_handle.load_das_file_startTime(file_path, self.interrogator)
+                    _, _, _, timestamp = dw.data_handle.load_das_data(
+                        file_path,
+                        [0, min(10, self.metadata['nx']), 1],
+                        self.metadata,
+                        self.interrogator
+                    )
                     timestamps.append(timestamp)
                 except Exception as e:
                     print(f"Warning: Could not load timestamp from {file_path}: {e}")
@@ -266,7 +328,6 @@ class Loader:
     
     def _extract_timestamps_from_filenames(self):
         """Extract timestamps from filenames using common patterns"""
-        # TODO: this may be complete but it still untested
         import re
         timestamps = []
         
@@ -343,14 +404,14 @@ class Loader:
             'first_file': self.file_list[0] if self.file_list else None,
             'last_file': self.file_list[-1] if self.file_list else None
         }
-    
+
 ################################ \ end of Loader class #########################################
 
 def get_chunk_filename(timestamp, extension='.h5'):
     """Generate standardized chunk filename from timestamp."""
     return f"{timestamp.strftime('%Y%m%d_%H%M%S')}{extension}"
 
-def save_chunk_h5(filepath, fk_dehyd):
+def save_chunk_h5(filepath, fk_dehyd, timestamp):
     """
     Save only the essential dehydrated F-K data.
     
@@ -366,6 +427,7 @@ def save_chunk_h5(filepath, fk_dehyd):
                         compression='gzip', compression_opts=6)
         f.attrs['version'] = '1.0'
         f.attrs['n_values'] = len(fk_dehyd)
+        f.create_dataset('timestamp', data=timestamp)
 
 def load_chunk_h5(filepath):
     """
@@ -415,41 +477,46 @@ def save_settings_h5(filepath, original_metadata, processing_settings,
         f.attrs['version'] = '1.0'
         f.attrs['software'] = 'DAS F-K Processor'
         
-        # Original metadata group
+        # Original metadata group - save everything as datasets
         orig_grp = f.create_group('original_metadata')
         for key, value in original_metadata.items():
-            if isinstance(value, (str, int, float, bool, np.integer, np.floating)):
-                orig_grp.attrs[key] = value
-            elif isinstance(value, (list, tuple)):
-                orig_grp.create_dataset(key, data=np.array(value))
-            elif isinstance(value, np.ndarray):
-                orig_grp.create_dataset(key, data=value)
-            else:
-                try:
-                    orig_grp.attrs[key] = str(value)
-                except:
-                    print(f"Warning: Could not save original metadata key '{key}'")
+            try:
+                if isinstance(value, (str, int, float, bool, np.integer, np.floating)):
+                    # Save scalars as single-element datasets instead of attributes
+                    orig_grp.create_dataset(key, data=value)
+                elif isinstance(value, (list, tuple)):
+                    orig_grp.create_dataset(key, data=np.array(value))
+                elif isinstance(value, np.ndarray):
+                    orig_grp.create_dataset(key, data=value)
+                else:
+                    # Convert to string and save as dataset
+                    orig_grp.create_dataset(key, data=str(value))
+            except Exception as e:
+                print(f"Warning: Could not save original metadata key '{key}': {e}")
         
-        # Processing settings group  
+        # Processing settings group - save everything as datasets
         proc_grp = f.create_group('processing_settings')
         for key, value in processing_settings.items():
-            if isinstance(value, (str, int, float, bool, np.integer, np.floating)):
-                proc_grp.attrs[key] = value
-            elif isinstance(value, (list, tuple)):
-                proc_grp.create_dataset(key, data=np.array(value))
-            elif isinstance(value, np.ndarray):
-                proc_grp.create_dataset(key, data=value)
-            else:
-                try:
-                    proc_grp.attrs[key] = str(value)
-                except:
-                    print(f"Warning: Could not save processing setting '{key}'")
+            try:
+                if isinstance(value, (str, int, float, bool, np.integer, np.floating)):
+                    # Save scalars as single-element datasets instead of attributes
+                    proc_grp.create_dataset(key, data=value)
+                elif isinstance(value, (list, tuple)):
+                    proc_grp.create_dataset(key, data=np.array(value))
+                elif isinstance(value, np.ndarray):
+                    proc_grp.create_dataset(key, data=value)
+                else:
+                    # Convert to string and save as dataset
+                    proc_grp.create_dataset(key, data=str(value))
+            except Exception as e:
+                print(f"Warning: Could not save processing setting '{key}': {e}")
         
-        # Rehydration info group - this is the key part!
+        # Rehydration info group - this should definitely be created!
         rehyd_grp = f.create_group('rehydration_info')
         rehyd_grp.create_dataset('nonzeros_mask', data=sample_nonzeros, 
                                compression='gzip', compression_opts=9)
-        rehyd_grp.attrs['target_shape'] = sample_shape
+        rehyd_grp.create_dataset('target_shape', data=np.array(sample_shape))
+        rehyd_grp.attrs['description'] = 'Template for rehydrating processed chunks'
         
         # Axes group
         axes_grp = f.create_group('axes')
@@ -464,6 +531,14 @@ def save_settings_h5(filepath, original_metadata, processing_settings,
             dt = h5py.string_dtype(encoding='utf-8')
             timestamp_strs = [pd.Timestamp(ts).isoformat() for ts in file_timestamps]
             nav_grp.create_dataset('file_start_times', data=timestamp_strs, dtype=dt)
+            nav_grp.attrs['total_files'] = len(file_timestamps)
+
+        print(f"Settings saved to {filepath}")
+        print(f"  - Original metadata: {len(original_metadata)} items")
+        print(f"  - Processing settings: {len(processing_settings)} items") 
+        print(f"  - Rehydration template: shape={sample_shape}, nonzeros={np.sum(sample_nonzeros)}")
+        if file_timestamps:
+            print(f"  - File timestamps: {len(file_timestamps)} files")
 
 def load_settings_h5(filepath):
     """
@@ -475,26 +550,43 @@ def load_settings_h5(filepath):
         Dictionary with all settings and rehydration info
     """
     with h5py.File(filepath, 'r') as f:
-        settings_data = {}
+        settings_data = {
+            'created': f.attrs.get('created', 'unknown'),
+            'version': f.attrs.get('version', 'unknown')
+        }
         
-        # Load original metadata
+        # Load original metadata (now all datasets)
         if 'original_metadata' in f:
             orig_meta = {}
             grp = f['original_metadata']
-            for key in grp.attrs:
-                orig_meta[key] = grp.attrs[key]
+            
             for key in grp.keys():
-                orig_meta[key] = grp[key][...]
+                data = grp[key][...]
+                # Convert single-element arrays back to scalars if appropriate
+                if isinstance(data, np.ndarray) and data.size == 1 and data.dtype.kind in 'biufc':
+                    orig_meta[key] = data.item()
+                elif isinstance(data, bytes):
+                    orig_meta[key] = data.decode()
+                else:
+                    orig_meta[key] = data
+            
             settings_data['original_metadata'] = orig_meta
         
-        # Load processing settings
+        # Load processing settings (now all datasets)
         if 'processing_settings' in f:
             proc_settings = {}
             grp = f['processing_settings']
-            for key in grp.attrs:
-                proc_settings[key] = grp.attrs[key]
+            
             for key in grp.keys():
-                proc_settings[key] = grp[key][...]
+                data = grp[key][...]
+                # Convert single-element arrays back to scalars if appropriate
+                if isinstance(data, np.ndarray) and data.size == 1 and data.dtype.kind in 'biufc':
+                    proc_settings[key] = data.item()
+                elif isinstance(data, bytes):
+                    proc_settings[key] = data.decode()
+                else:
+                    proc_settings[key] = data
+            
             settings_data['processing_settings'] = proc_settings
         
         # Load rehydration info
@@ -502,7 +594,7 @@ def load_settings_h5(filepath):
             rehyd_grp = f['rehydration_info']
             settings_data['rehydration_info'] = {
                 'nonzeros_mask': rehyd_grp['nonzeros_mask'][...],
-                'target_shape': tuple(rehyd_grp.attrs['target_shape'])
+                'target_shape': tuple(rehyd_grp['target_shape'][...])
             }
         
         # Load axes
@@ -512,5 +604,12 @@ def load_settings_h5(filepath):
                 'frequency': axes_grp['frequency'][...],
                 'wavenumber': axes_grp['wavenumber'][...]
             }
+        
+        # Load file timestamps
+        if 'navigation' in f:
+            nav_grp = f['navigation']
+            timestamps_str = [ts.decode() if isinstance(ts, bytes) else ts 
+                            for ts in nav_grp['file_start_times']]
+            settings_data['file_timestamps'] = [pd.Timestamp(ts) for ts in timestamps_str]
         
         return settings_data

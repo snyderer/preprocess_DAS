@@ -7,6 +7,8 @@ Includes interpolation, dehydration, and rehydration functions.
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
+from scipy import ndimage
+from scipy.signal import windows
 import das4whales as dw
 
 def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
@@ -67,10 +69,17 @@ def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
     D[np.abs(k) > k_max_new, :] = 0
     D[:, np.abs(f) > f_max_new] = 0
     
+    # Calculate scaling factors to preserve amplitude
+    # This accounts for the change in sampling intervals
+    scale_factor = (new_dx / dx) * (new_dt / dt)
+    
     # Interpolate in f-k domain
     interp = RegularGridInterpolator((k, f), D, bounds_error=False, fill_value=0)
     K, F = np.meshgrid(k_new, f_new, indexing='ij')
     Dfk = interp(np.stack([K.ravel(), F.ravel()], axis=-1)).reshape(K.shape)
+    
+    # Apply scaling factor
+    Dfk *= scale_factor
     
     if output_format == 'fk':
         return Dfk, f_new, k_new
@@ -82,27 +91,116 @@ def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
     else:
         raise ValueError('output_format must be "fk" or "tx"')
 
-def create_fk_mask(shape, dx, fs, cs_min=1400, cp_min=1480, cp_max=6800, cs_max=7000, return_half = True):
+def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=7000,  
+                   fmin=None, fmax=None, return_half = True, fft_shift = True):
     """
     create an fk filter mask using das4whales
 
     Parameters:
     -----------
-    nx : number of spatial samples
-    ns : number of time samples
-    dx : spatial distance
-    fs : sampling rate
-    cs_min, cp_min, cp_max, cs_max : range of expected soundspeeds
+    shape : [nx, ns], number of spatial samples by number of time samples
+    dx : spatial distance [m]
+    fs : sampling rate [Hz]
+    cs_min, cp_min, cp_max, cs_max : range of expected soundspeeds [m/s]
     return_half : True to return only positive frequencies
 
     Returns:
     fk_mask : mask to be applied to F-K data
+    
+    TODO:  originally returned fk mask from DAS4Whales, but this needs some work 
+    to do what I want it to (tapered in f and k, numerical/indexing accuracy).
+    For now, I'm running my own custom fk_filter design. I will incorporate this
+    into DAS4Whales eventually. 
     """
-    fk_mask = dw.dsp.fk_filter_design(shape, [0, shape[0]-1, 1], dx, fs, cs_min=cs_min, cp_min=cp_min,
-                                    cp_max=cp_max, cs_max=cs_max)
+    
+    #fk_mask = dw.dsp.fk_filter_design(shape, [0, shape[0]-1, 1], dx, fs, 
+    #                                cs_min=cs_min, cp_min=cp_min,
+    #                                cp_max=cp_max, cs_max=cs_max)
+    nx, ns = shape
+    fk_mask = np.zeros(shape).astype(complex)
+
+    freq = np.fft.fftfreq(shape[1], d=1/fs)
+    knum = np.fft.fftfreq(shape[0], d=dx)
+
+    for i in range(len(knum)):
+        fs_min = np.abs(knum[i] * cs_min)
+        fp_min = np.abs(knum[i] * cp_min)
+
+        fp_max = np.abs(knum[i] * cp_max)
+        fs_max = np.abs(knum[i] * cs_max)
+
+        idx = np.where(np.logical_and(np.abs(freq)>=fmin, np.abs(freq)<=fmax))
+        fk_mask[i, idx] = 1
+
+    if fft_shift:
+        fk_mask = np.fft.fftshift(fk_mask)
+
     if return_half:
-        fk_mask = fk_mask[:, ns//2-1:]
+        fk_mask = fk_mask[:, :int(ns/2+1)]
+
     return fk_mask
+
+def taper_constant(fk_mask, mask_type = 'tukey', widening_factor=.01, **kwargs):
+    """
+    taper the edges of a binary F-K mask by a constant "widening factor" (independent of phase speed)
+
+     Parameters:
+    -----------
+    fk_mask : the mask to taper [nx x ns]
+    mask_type : the type of mask/window function to apply. Options: 
+        'tukey' (default)
+        [others forthcoming]
+    widening_factor : determines number of samples to taper over (always expands f-k mask).
+        if widening_factor >= 1 it is used # of samples in taper edges
+        if widening_factor < 1 it is used as portion of full image size in shortest dimension
+            i.e. taper_width = int(min([nx, ns])*widening_factor)
+    additional window-specific arguments can be passed as keyword arguments
+
+    Returns:
+    fk_mask_tapered : tapered mask
+
+    example usage:
+    fk_mask_tapered = taper_mask(fk_mask, 'tukey', 10, alpha=.5)
+    """
+    nx, ns = fk_mask.shape
+
+    # set taper width:
+    if widening_factor>=1:
+        taper_width = int(widening_factor)
+    elif 0 < widening_factor < 2:
+        taper_width = int(widening_factor*min([nx, ns]))
+    else:
+        raise ValueError("invalid widening_factor: must be > 0")
+    
+    if taper_width > min([nx, ns])/2:
+        raise ValueError("invalid widening_factor: must be < min([nx, ns])/2")
+
+    if mask_type.lower() == 'tukey':
+        alpha = kwargs.get('alpha', 1)  # Default alpha=1 if not specified
+        win = windows.tukey(2*taper_width + 1, alpha=alpha)
+    else:
+        raise ValueError("unrecognized mask_type")
+
+    up_slope = win[:taper_width]
+    down_slope = win[taper_width+1:]
+
+    binary_mask = (fk_mask > 0).astype(bool)
+    fk_mask_tapered = fk_mask
+
+    # Calculate distance transforms
+    distance_outside = ndimage.distance_transform_edt(~binary_mask) # calculates distance to nearest non-zero value
+
+    outside_mask = ~binary_mask & (distance_outside <= taper_width) # locations where a taper is needed
+    outside_distances = distance_outside[outside_mask].astype(int) - 1 # index of taper to be used
+    fk_mask_tapered[outside_mask] = down_slope[outside_distances]
+
+    full_row_mask = np.concatenate([up_slope, np.ones([nx-2*taper_width]), down_slope])
+    full_col_mask = np.concatenate([up_slope, np.ones([ns-2*taper_width]), down_slope])
+    full_image_mask = np.outer(full_row_mask, full_col_mask)
+    fk_mask_tapered *= full_image_mask
+
+    return fk_mask_tapered
+
 
 def dehydrate_fk(fk_data, mask):
     """
@@ -184,9 +282,9 @@ def rehydrate(fk_dehyd, nonzeros, original_shape, return_format='tx'):
     elif return_format == 'tx':
         # Convert back to time-space domain
         # First inverse FFT in space (full complex FFT)
-        fk_space_domain = np.fft.ifft(fk_positive, axis=0)
+        fx_domain = np.fft.ifft(fk_positive, axis=0)
         # Then inverse FFT in time (real FFT for positive frequencies)
-        tx_data = np.fft.irfft(fk_space_domain, n=nt, axis=1)
+        tx_data = np.fft.irfft(fx_domain, n=nt, axis=1)
         return tx_data
     else:
         raise ValueError("return_format must be 'tx' or 'fk'")
