@@ -135,10 +135,9 @@ def process_directory(input_dir, output_dir, interrogator, settings,
                 
                 fk_mask = df.create_fk_mask(
                     Dfk.shape, settings['dx'], settings['fs'], 
-                    cs_min=settings.get('cs_min'), 
-                    cp_min=settings['cp_min'], 
-                    cp_max=settings['cp_max'], 
-                    cs_max=settings.get('cs_max')
+                    cs_min=settings['cs_min'], cp_min=settings['cp_min'], 
+                    cp_max=settings['cp_max'], cs_max=settings['cs_max'],
+                    fmin=settings['f_min'], fmax=settings['f_max']
                 )
                                 
                 # Generate axes for settings file

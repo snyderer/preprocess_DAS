@@ -9,6 +9,7 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from scipy import ndimage
 from scipy.signal import windows
+from scipy import signal as sp
 import das4whales as dw
 
 def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
@@ -71,7 +72,7 @@ def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
     
     # Calculate scaling factors to preserve amplitude
     # This accounts for the change in sampling intervals
-    scale_factor = (new_dx / dx) * (new_dt / dt)
+    scale_factor = (dx/new_dx) * (dt/new_dt)
     
     # Interpolate in f-k domain
     interp = RegularGridInterpolator((k, f), D, bounds_error=False, fill_value=0)
@@ -92,7 +93,7 @@ def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
         raise ValueError('output_format must be "fk" or "tx"')
 
 def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=7000,  
-                   fmin=None, fmax=None, return_half = True, fft_shift = True):
+                   fmin=15, fmax=90, df_taper=14, return_half = True, fft_shift = True):
     """
     create an fk filter mask using das4whales
 
@@ -117,11 +118,26 @@ def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=
     #                                cs_min=cs_min, cp_min=cp_min,
     #                                cp_max=cp_max, cs_max=cs_max)
     nx, ns = shape
-    fk_mask = np.zeros(shape).astype(complex)
 
     freq = np.fft.fftfreq(shape[1], d=1/fs)
     knum = np.fft.fftfreq(shape[0], d=dx)
 
+    # design butterworth filter for taper edges:
+    b, a = sp.butter(8, [fmin/(fs/2), fmax/(fs/2)], 'bp')
+    _, h = sp.freqz(b, a, worN=freq, fs=fs)
+    H = np.abs(h)**2
+    
+    fk_mask = np.tile(H, (len(knum), 1))
+    
+    # Apply taper to the frequencies of interest:
+    fpmax = fmax + df_taper
+    fpmin = fmin - df_taper
+
+    # Find the corresponding indexes:
+    fmin_idx = np.argmax(freq >= fpmin)
+    fmax_idx = np.argmax(freq >= fpmax)
+
+    # TODO I think I can vectorize this loop:
     for i in range(len(knum)):
         fs_min = np.abs(knum[i] * cs_min)
         fp_min = np.abs(knum[i] * cp_min)
@@ -129,15 +145,43 @@ def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=
         fp_max = np.abs(knum[i] * cp_max)
         fs_max = np.abs(knum[i] * cs_max)
 
-        idx = np.where(np.logical_and(np.abs(freq)>=fmin, np.abs(freq)<=fmax))
-        fk_mask[i, idx] = 1
+        filter_line = np.ones(shape=[len(freq)], dtype=float, order='F')
 
-    if fft_shift:
-        fk_mask = np.fft.fftshift(fk_mask)
+        if fs_min != fp_min:
+            # Filter transition band, ramping up from cs_min to cp_min
+            selected_speed_mask = ((freq >= fs_min) & (freq <= fp_min)) # positive frequencies
+            filter_line[selected_speed_mask] = np.sin(0.5 * np.pi *
+                                                        (freq[selected_speed_mask] - fs_min) / (fp_min - fs_min))
+            
+            selected_speed_mask = ((-freq >= fs_min) & (-freq <= fp_min)) # negative frequencies
+            filter_line[selected_speed_mask] = np.sin(0.5 * np.pi *
+                                                        (freq[selected_speed_mask] + fs_min) / (fp_min - fs_min))
+            
+        if fs_max != fp_max:
+            # Filter transition band, going down from cp_max to cs_max
+            selected_speed_mask = ((freq >= fp_max) & (freq <= fs_max)) # positive frequencies
+            filter_line[selected_speed_mask] = np.cos(0.5 * np.pi *
+                                                            (freq[selected_speed_mask] - fp_max) / (fs_max - fp_max))
+            
+            selected_speed_mask = ((-freq >= fp_max) & (-freq <= fs_max)) # negative frequencies
+            filter_line[selected_speed_mask] = np.cos(0.5 * np.pi *
+                                                            (freq[selected_speed_mask] + fp_max) / (fs_max - fp_max))
+        
+        # Stopband
+        filter_line[np.abs(freq) >= fs_max] = 0
+        filter_line[np.abs(freq) < fs_min] = 0
 
-    if return_half:
+        # Fill the filter matrix
+        fk_mask[i, :] *= filter_line
+
+    if fft_shift & return_half:
         fk_mask = fk_mask[:, :int(ns/2+1)]
-
+        fk_mask = np.fft.fftshift(fk_mask, axes=0)
+    elif fft_shift and not return_half:
+        fk_mask = np.fft.fftshift(fk_mask)
+    elif not fft_shift and return_half:
+        fk_mask = fk_mask[:, int(ns/2+1):]
+    
     return fk_mask
 
 def taper_constant(fk_mask, mask_type = 'tukey', widening_factor=.01, **kwargs):

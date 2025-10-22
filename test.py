@@ -30,7 +30,7 @@ import scipy.signal as sp
 
 # dw.plot.plot_tx(tx, t, x)
 
-# # load and plot original data:
+# load and plot original data:
 # fpath_orig = r'E:\testingData\OOI\DASData\OptaSense\North_C2\North-C2-HF-P1kHz-GL30m-Sp2m-FS500Hz_2021-11-02T220001Z.h5'
 # md = dw.data_handle.get_acquisition_parameters(fpath_orig, 'optasense')
 # selchan = settings['processing_settings']['selected_channels']
@@ -46,9 +46,9 @@ import scipy.signal as sp
 # dw.plot.plot_tx(txf_orig, t_orig, x_orig)
 
 
-tx_drive_letter = 'D'
+tx_data_path = r'C:\Users\ers334\Desktop\testingData'
 
-fpath = tx_drive_letter + r':\svalbard_r2\20220822_125007.h5'
+fpath = os.path.join(tx_data_path, r'svalbard_r2\20220822_120157.h5')
 fpn = os.path.split(fpath)
 print(fpn)
 data = io.load_chunk_h5(fpath)
@@ -63,13 +63,13 @@ x = np.arange(tx.shape[0])*dx
 #plt.imshow(20*np.log10(np.abs(tx)), )
 
 dw.plot.plot_tx(tx, t, x)
-fig = plt.gcf()
-plt.text(5, 39, 'Rehydrated Data', fontsize=16, color='w', horizontalalignment='center')
-plt.savefig(r'C:\Users\ers334\Documents\weeklyUpdates\2025_10_23\rehydrated_tx.png')
+# fig = plt.gcf()
+# plt.text(5, 39, 'Rehydrated Data', fontsize=16, color='w', horizontalalignment='center')
+# plt.savefig(r'C:\Users\ers334\Documents\weeklyUpdates\2025_10_23\rehydrated_tx.png')
 
 
 # load and plot original data:
-fpath_orig = tx_drive_letter + r':\testingData\Svalbard\data\125007.hdf5'
+fpath_orig = os.path.join(tx_data_path, r'Svalbard\data\120057.hdf5')
 md = dw.data_handle.get_acquisition_parameters(fpath_orig, 'asn')
 selchan = settings['processing_settings']['selected_channels']
 selchan[2] = 2
@@ -82,15 +82,23 @@ fk_filter_matrix = dw.dsp.fk_filter_design(tx_orig.shape, selchan, md['dx'], md[
 txf_orig = dw.dsp.fk_filter_filt(txf_orig, fk_filter_matrix)
 
 dw.plot.plot_tx(txf_orig, t_orig, x_orig)
-plt.text(5, 39, 'Original Data', fontsize=16, color='w', horizontalalignment='center')
-plt.savefig(r'C:\Users\ers334\Documents\weeklyUpdates\2025_10_23\original_tx.png')
+# plt.text(5, 39, 'Original Data', fontsize=16, color='w', horizontalalignment='center')
+# plt.savefig(r'C:\Users\ers334\Documents\weeklyUpdates\2025_10_23\original_tx.png')
 
 # move through the process step by step to see where amplitudes differences enter:
 fk_mask_orig = df.create_fk_mask(tx_orig.shape, md['dx'], md['fs'])
-fk_mask_orig_tapered = df.taper_mask(fk_mask_orig)
 
-tmp = dw.dsp.hybrid_ninf_filter_design(txf_orig.shape, selchan, dx, fs, cs_min=1400., cp_min=1450., cp_max=3400, cs_max=3500, fmin=5., fmax=fs/2-5, display_filter=True)
+# fk_mask_sparse = dw.dsp.hybrid_ninf_filter_design(tx_orig.shape, selchan, md['dx'], md['fs'], fmin=15, fmax=90, 
+#                             cs_min=1300., cp_min=1450., cp_max=4500, cs_max=6000, display_filter=True)
 
-ok=1
+# fk_mask_hyb = fk_mask_sparse.todense()
 
-# txfi = df.fk_interpolate()
+# txf = dw.dsp.fk_filter_sparsefilt(txf_orig, fk_mask_sparse, tapering=True)
+
+dw.plot.plot_tx(txf_orig, t_orig, x_orig)
+
+txfi, ti, xi = df.fk_interpolate(txf_orig, md['dx'], md['fs'], dx, fs, output_format='tx')
+
+scale_factor = txfi.max()/txf_orig.max()
+print(scale_factor)
+dw.plot.plot_tx(txfi, ti, xi)
