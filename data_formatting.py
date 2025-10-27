@@ -87,7 +87,7 @@ def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
     elif output_format == 'tx':
         tr = np.fft.ifft2(np.fft.ifftshift(Dfk)).real
         t = np.arange(tr.shape[1]) * new_dt
-        x = np.arange(tr.shape[0]) * new_dx
+        x = np.arange(tr.shape[0]) * new_dxF
         return tr, t, x
     else:
         raise ValueError('output_format must be "fk" or "tx"')
@@ -175,12 +175,12 @@ def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=
         fk_mask[i, :] *= filter_line
 
     if fft_shift & return_half:
-        fk_mask = fk_mask[:, :int(ns/2+1)]
+        fk_mask = fk_mask[:, :ns//2+1]
         fk_mask = np.fft.fftshift(fk_mask, axes=0)
     elif fft_shift and not return_half:
         fk_mask = np.fft.fftshift(fk_mask)
     elif not fft_shift and return_half:
-        fk_mask = fk_mask[:, int(ns/2+1):]
+        fk_mask = fk_mask[:, ns//2+1:]
     
     return fk_mask
 

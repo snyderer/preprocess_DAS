@@ -4,9 +4,9 @@ import data_formatting as df
 import numpy as np
 import processing
 
-dataset = 'svalbard_r2'
+dataset = 'medsea_r1'
 #dataset = 'OOI_optasense_north_c2_r1'
-mode = 'testing'    # processing or testing
+mode = 'processing'    # processing or testing
 
 settings = {
     'fs': 200,
@@ -41,7 +41,16 @@ elif 'ooi_optasense_north' in dataset.lower():
     input_dir = os.path.join(rootDataDir, r'OOI\DASData\OptaSense\North_C'+dataset[-4])
     output_dir = os.path.join(outDataDir, r'ooi_optasense_north_c'+dataset[-4]+'_r'+dataset[-1])
     interrogator='optasense'
+elif 'ooi_optasense_south' in dataset.lower():
+    input_dir = os.path.join(rootDataDir, r'OOI\DASData\OptaSense\South_C'+dataset[-4])
+    output_dir = os.path.join(outDataDir, r'ooi_optasense_south_c'+dataset[-4]+'_r'+dataset[-1])
+    interrogator='optasense'
+elif 'medsea' in dataset.lower():
+    input_dir = os.path.join(rootDataDir, r'MedSea\data\20230922')
+    output_dir = os.path.join(outDataDir, r'medsea_r'+dataset[-1])
+    interrogator = 'asn'
 
+# run data processing:
 results = processing.process_directory(
     input_dir=input_dir,
     output_dir=output_dir,
