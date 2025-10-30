@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import h5py
-import das4whales as dw
+#import das4whales as dw
+from das4whales import data_handle as dh, dsp as dsp
 import data_formatting as df
 
 class Loader:
@@ -107,7 +108,7 @@ class Loader:
     def _load_metadata(self):
         """Load metadata from first file using DAS4Whales"""
         try:
-            self.metadata = dw.data_handle.get_acquisition_parameters(
+            self.metadata = dh.get_acquisition_parameters(
                 self.file_list[0], 
                 interrogator=self.interrogator
             )
@@ -143,7 +144,7 @@ class Loader:
         self.filter_sos = None
         if self.bandpass_filter is not None:
             try:
-                self.filter_sos = dw.dsp.butterworth_filter(
+                self.filter_sos = dsp.butterworth_filter(
                     self.bandpass_filter, 
                     self.metadata['fs']
                 )
@@ -159,7 +160,7 @@ class Loader:
         file_path = self.file_list[file_index]
         
         try:
-            trace, tx, dist, timestamp = dw.data_handle.load_das_data(
+            trace, tx, dist, timestamp = dh.load_das_data(
                 file_path,
                 self.selected_channels,
                 self.metadata,
@@ -277,7 +278,7 @@ class Loader:
         if method == 'first_only':
             # Load first file timestamp and calculate others
             try:
-                _, _, _, first_timestamp = dw.data_handle.load_das_data(
+                _, _, _, first_timestamp = dh.load_das_data(
                     self.file_list[0],
                     [0, min(10, self.metadata['nx']), 1],
                     self.metadata,
@@ -301,7 +302,7 @@ class Loader:
             print("Loading timestamps from all files (this may take time)...")
             for file_path in self.file_list:
                 try:
-                    _, _, _, timestamp = dw.data_handle.load_das_data(
+                    _, _, _, timestamp = dh.load_das_data(
                         file_path,
                         [0, min(10, self.metadata['nx']), 1],
                         self.metadata,

@@ -15,5 +15,10 @@ dependencies = [
   # e.g., "numpy", "pandas"
 ]
 
+dependencies = [
+    h5py
+    "DAS4Whales @ git+https://github.com/snyderer/DAS4Whales@ericsBranch"
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

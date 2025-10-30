@@ -10,7 +10,7 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy import ndimage
 from scipy.signal import windows
 from scipy import signal as sp
-import das4whales as dw
+#import das4whales as dw # only need once I start using das4whales to generate F-K mask
 
 def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
     """
