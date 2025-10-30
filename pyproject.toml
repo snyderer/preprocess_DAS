@@ -14,7 +14,7 @@ requires-python = ">=3.8"
 
 dependencies = [
     "h5py",
-    "DAS4Whales @ git+https://github.com/DAS4Whales/DAS4Whales"
+    "DAS4Whales @ git+https://github.com/snyderer/DAS4Whales@ericsBranch"
 ]
 
 [tool.setuptools.packages.find]
