@@ -7,13 +7,10 @@ name = "preprocess-DAS"
 version = "0.1.0"
 description = "Tools for DAS data preprocessing"
 authors = [
-  { name = "Your Name", email = "you@example.com" }
+  { name = "Dr. Eric R. Snyder", email = "esnyder@cornell.edu" }
 ]
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = [
-  # e.g., "numpy", "pandas"
-]
 
 dependencies = [
     h5py

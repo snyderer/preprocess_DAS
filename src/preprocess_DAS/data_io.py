@@ -11,7 +11,7 @@ import pandas as pd
 from pathlib import Path
 import h5py
 #import das4whales as dw
-from das4whales import data_handle as dh, dsp as dsp
+from das4whales import data_handle as dh, dsp
 import data_formatting as df
 
 class Loader:
