@@ -108,8 +108,7 @@ def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=
     Returns:
     fk_mask : mask to be applied to F-K data
     
-    TODO:  originally returned fk mask from DAS4Whales, but this needs some work 
-    to do what I want it to (tapered in f and k, numerical/indexing accuracy).
+    TODO:  originally returned fk mask from DAS4Whales, but DAS4Whales still has a minor indexing error.
     For now, I'm running my own custom fk_filter design. I will incorporate this
     into DAS4Whales eventually. 
     """
@@ -205,6 +204,8 @@ def taper_constant(fk_mask, mask_type = 'tukey', widening_factor=.01, **kwargs):
 
     example usage:
     fk_mask_tapered = taper_mask(fk_mask, 'tukey', 10, alpha=.5)
+
+    NOTE: this is not currently used! I just kept it because it might be worth testing this vs other tapering methods at some stage.
     """
     nx, ns = fk_mask.shape
 

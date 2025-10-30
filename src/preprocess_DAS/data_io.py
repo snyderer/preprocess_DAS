@@ -11,6 +11,7 @@ import pandas as pd
 from pathlib import Path
 import h5py
 import das4whales as dw
+import data_formatting as df
 
 class Loader:
     """
@@ -540,7 +541,7 @@ def save_settings_h5(filepath, original_metadata, processing_settings,
         if file_timestamps:
             print(f"  - File timestamps: {len(file_timestamps)} files")
 
-def load_settings_h5(filepath):
+def load_settings_preprocessed_h5(filepath):
     """
     Load settings and rehydration info.
     
@@ -555,7 +556,7 @@ def load_settings_h5(filepath):
             'version': f.attrs.get('version', 'unknown')
         }
         
-        # Load original metadata (now all datasets)
+        # Load original metadata
         if 'original_metadata' in f:
             orig_meta = {}
             grp = f['original_metadata']
@@ -613,3 +614,25 @@ def load_settings_h5(filepath):
             settings_data['file_timestamps'] = [pd.Timestamp(ts) for ts in timestamps_str]
         
         return settings_data
+
+def load_preprocessed_h5(filepath):
+    """
+    Just loads a preprocessed h5 file in its compressed format.
+    """
+    h = h5py(filepath)
+    fk_dehyd = np.array(h['fk_dehyd'])
+    timestamp = np.double(h['timestamp'])
+    return fk_dehyd, timestamp
+
+def load_rehydrate_preprocessed_h5(filepath, settings_data = None, return_format = 'tx'):
+    """
+    Loads and rehydrates preprocessed data from a selected h5 file
+    """
+    if settings_data is None:
+        # find the settings file in this directory:
+        settings_file = os.path.dirname(filepath) + r'\settings.h5'
+        settings_data = load_settings_preprocessed_h5(settings_file)
+    
+    fk_dehyd, timestamp = load_preprocessed_h5(filepath)
+    data = df.rehydrate(fk_dehyd, settings_data['rehydration_info']['nonzeros'], settings_data['rehydration_info']['target_shape'], return_format)
+    return data
