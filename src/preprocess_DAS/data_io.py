@@ -461,9 +461,9 @@ def load_preprocessed_h5(filepath):
     """
     Just loads a preprocessed h5 file in its compressed format.
     """
-    h = h5py(filepath)
-    fk_dehyd = np.array(h['fk_dehyd'])
-    timestamp = np.double(h['timestamp'])
+    with h5py.File(filepath, 'r') as h:
+        fk_dehyd = h['fk_dehyd'][...]
+        timestamp = h['timestamp'][()]
     return fk_dehyd, timestamp
 
 def load_rehydrate_preprocessed_h5(filepath, settings_data = None, return_format = 'tx'):
@@ -476,5 +476,13 @@ def load_rehydrate_preprocessed_h5(filepath, settings_data = None, return_format
         settings_data = load_settings_preprocessed_h5(settings_file)
     
     fk_dehyd, timestamp = load_preprocessed_h5(filepath)
-    data = df.rehydrate(fk_dehyd, settings_data['rehydration_info']['nonzeros'], settings_data['rehydration_info']['target_shape'], return_format)
-    return data
+    data = df.rehydrate(fk_dehyd, settings_data['rehydration_info']['nonzeros_mask'], settings_data['rehydration_info']['target_shape'], return_format)
+
+    if return_format.lower() == 'tx':
+        t = np.arange(data.shape[1])/settings_data['processing_settings']['fs']
+        x = np.arange(data.shape[0])*settings_data['processing_settings']['dx']
+        return data, t, x, timestamp
+    elif return_format.lower() == 'fk':
+        f = np.fft.rfftfreq(data.shape[1], d=1/settings_data['processing_settings']['fs'])
+        k = np.fft.fftshift(np.fft.fftfreq(data.shape[0], d=settings_data['processing_settings']['dx']))
+        return data, f, k, timestamp
