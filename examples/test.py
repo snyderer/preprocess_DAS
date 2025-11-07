@@ -29,14 +29,20 @@ md = dw.data_handle.get_acquisition_parameters(fpath_orig, interrogator)
 selchan = settings['processing_settings']['selected_channels']
 tx_orig, t_orig, x_orig, file_begin_time_utc = dw.data_handle.load_das_data(fpath_orig, selchan, md, interrogator)
 f_hi = min(90, int(md['fs']/2-5))
-filter_sos = dw.dsp.butterworth_filter([5, [10, f_hi], 'bp'], md['fs'])
+filter_sos = dw.dsp.butterworth_filter(settings['processing_settings']['bandpass_filter'], md['fs'])
 txf_orig = sp.sosfiltfilt(filter_sos, tx_orig, axis=-1)
 
-fk_filter_matrix = dw.dsp.fk_filter_design(tx_orig.shape, selchan, md['dx'], md['fs'], cs_min=1400, cp_min=1450, cp_max=6800, cs_max=7000, display_filter=False)
-txf_orig = dw.dsp.fk_filter_filt(txf_orig, fk_filter_matrix)
+#fk_filter_matrix = dw.dsp.fk_filter_design(tx_orig.shape, selchan, md['dx'], md['fs'], cs_min=1400, cp_min=1450, cp_max=6800, cs_max=7000, display_filter=False)
+fk_filter_matrix = df.create_fk_mask(tx_orig.shape, md['dx'], md['fs'], 
+    cs_min=settings['processing_settings']['cs_min'],
+    cp_min=settings['processing_settings']['cp_min'],
+    cp_max=settings['processing_settings']['cp_max'],
+    cs_max=settings['processing_settings']['cs_max'], 
+    fmin=settings['processing_settings']['f_min'],
+    fmax=settings['processing_settings']['f_max'], 
+    return_half = False, fft_shift=True)
 
-# move through the process step by step to see where amplitudes differences enter:
-fk_mask_orig = df.create_fk_mask(tx_orig.shape, md['dx'], md['fs'], fmax=f_hi)
+txf_orig = dw.dsp.fk_filter_filt(txf_orig, fk_filter_matrix)
 
 txfi, ti, xi = df.fk_interpolate(txf_orig, md['dx'], md['fs'], dx, fs, output_format='tx')
 
@@ -49,7 +55,7 @@ v_max = 9
 plt.figure(figsize=(16, 6))
 plt.subplot(1, 3, 1)
 plt.imshow(np.abs(tx)*1e9, extent=[t.min(), t.max(), x.min(), x.max()], aspect='auto',
-    origin='lower', cmap='turbo', vmin=v_min, vmax=v_max, interpolation_stage='data')
+    origin='lower', cmap='turbo', vmin=v_min, vmax=v_max)
 plt.xlabel('time [s]')
 plt.ylabel('distance [m]')
 plt.title('rehydrated data')
@@ -57,15 +63,15 @@ plt.colorbar()
 
 plt.subplot(1,3,2)
 plt.imshow(np.abs(txfi)*1e9, extent=[ti.min(), ti.max(), xi.min(), xi.max()], aspect='auto', 
-    origin='lower', cmap='turbo', vmin=v_min, vmax=v_max, interpolation_stage='data')
+    origin='lower', cmap='turbo', vmin=v_min, vmax=v_max)
 plt.xlabel('time [s]')
 plt.ylabel('distance [m]')
 plt.title('original data, interpolated')
 plt.colorbar()
 
 plt.subplot(1,3,3)
-plt.imshow(np.abs(np.abs(txfi)-np.abs(tx))*1e9, extent=[t_orig.min(), t_orig.max(), x_orig.min(), x_orig.max()], aspect='auto',
-    origin='lower', cmap='turbo', vmin=v_min, vmax=v_max, interpolation_stage='data')
+plt.imshow(np.abs(np.abs(txfi)-np.abs(tx))*1e9, extent=[t.min(), t.max(), x.min(), x.max()], aspect='auto',
+    origin='lower', cmap='turbo', vmin=v_min, vmax=v_max)
 plt.xlabel('time [s]')
 plt.ylabel('distance [m]')
 plt.title('amplitude difference')

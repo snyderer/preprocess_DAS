@@ -4,8 +4,8 @@ from preprocess_DAS import data_formatting as df
 from preprocess_DAS import processing
 import numpy as np
 
-# dataset = 'medsea_full'
-dataset = 'ooi_optasense_north_c2_full'
+dataset = 'medsea_full'
+# dataset = 'ooi_optasense_north_c2_full'
 mode = 'testing'    # processing or testing
 
 settings = {

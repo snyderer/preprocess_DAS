@@ -12,7 +12,7 @@ settings = {
     'fs': 200,
     'dx': 8,
     'cable_span': 40,   # km
-    'use_full_cable': False,
+    'use_full_cable': True,
     'start_distance': -40.01,    # km (if <0, counts distance from the end of cable)
     'twin_sec': 30,
     'cs_min': 1380,
