@@ -16,38 +16,19 @@ import preprocess_DAS.data_formatting as df
 
 class Loader:
     """
-    DAS data loader class using DAS4Whales basic load function for consistent data access.
-    
-    This class handles initialization of metadata and provides iteration over
-    a directory of DAS files with consistent preprocessing.
+    Continuous DAS data loader with buffer, edge padding, drift-free chunking.
+    Compatible with existing process_directory pipeline.
     """
-    
+
     def __init__(self, input_dir, interrogator='optasense', 
-                 start_distance_km=-40.01, cable_span_km=40, dx_in_m=None,
-                 time_window_s=30, start_file_index=0, end_file_index=None,
-                 bandpass_filter=None):
+                 start_distance_km=-40.01, cable_span_km=40, 
+                 use_full_cable = False, dx_in_m=None,
+                 time_window_s=30, start_file_index=0, 
+                 end_file_index=None, bandpass_filter=None):
         """
-        Initialize the DAS data loader.
-        
-        Parameters:
-        -----------
-        input_dir : str or Path
-            Directory containing DAS files
-        interrogator : str
-            Interrogator type for DAS4Whales ('optasense', 'silixa', etc.)
-        start_distance_km : distance from channel 0 where data will be loaded [km]
-            if start_distance_km < 0, it will measure from the end of the cable 
-        cable_span_km : length of cable to be loaded [km]
-        dx_in_m : desired distance between cables [m]. 
-            if dx_in_m < metadata['dx'], it will load every segment within defined span
-        time_window_s : float
-            Time window for each chunk in seconds
-        start_file_index : int
-            Index of first file to process
-        end_file_index : int, optional
-            Index of last file to process (None for all files)
-        bandpass_filter : list, optional
-            Filter parameters [order, [low_freq, high_freq], 'bp'] for DAS4Whales
+        input_dir : input directory
+        interrogator : tells DAS4Whales what interrogator to use
+        start_distance_km = location of start segment
         """
         self.input_dir = Path(input_dir)
         self.interrogator = interrogator
@@ -55,363 +36,193 @@ class Loader:
         self.start_file_index = start_file_index
         self.end_file_index = end_file_index
         self.bandpass_filter = bandpass_filter
-        
-        # Get file list
+
         self._get_file_list()
-        
-        # Load metadata from first file
         self._load_metadata()
         
-        # Set up channel selection
         self._setup_channels(start_distance_km, cable_span_km, dx_in_m)
-        
-        # Create bandpass filter if specified
+        if use_full_cable:
+            self.selected_channels[0] = 0
+            self.selected_channels[1] = self.metadata['nx']
+
+        # correct bandpass_filter settings if sampling rate is too low:
+        if self.bandpass_filter is not None and self.bandpass_filter[1][1]>self.metadata['fs']:
+            self.bandpass_filter[1][1] = int(np.floor(self.metadata['fs']/2)-2)
         self._setup_filter()
+        self._init_padding_and_window()  # NEW padding/window init
         
-        # Initialize iteration state
-        self.current_file_index = 0
-        self.current_data = None
-        self.current_time_axis = None
-        self.current_dist_axis = None
-        self.current_file_timestamp = None
-        self.current_time_position = 0  # Position within current file (seconds)
-        
-        print(f"Loader initialized:")
-        print(f"  Files: {len(self.file_list)} ({self.start_file_index} to {self.end_file_index})")
-        print(f"  Channels: {self.selected_channels}")
-        print(f"  Sampling: {self.metadata['fs']} Hz, {self.metadata['dx']} m spacing")
-        print(f"  Time window: {self.time_window_s} s")
-        
+        # Iteration state
+        self.file_index = 0
+        self.buffer = None
+        self.buffer_time_axis = None
+        self.buffer_start_timestamp = None
+        self.global_start_timestamp = None  # anchor for drift-free timestamps
+        self.global_buffer_start_sample = None
+        self.dist_axis = None
+        self.window_number = 0
+
+    # ------------------------------------------------------------
+    # Setup methods (same as before)
     def _get_file_list(self):
-        """Get and sort list of DAS files"""
         extensions = ['.h5', '.hdf5', '.tdms']
         self.file_list = []
-        
         for ext in extensions:
             self.file_list.extend(self.input_dir.glob(f'*{ext}'))
-        
         if not self.file_list:
             raise FileNotFoundError(f"No DAS files found in {self.input_dir}")
-        
-        # Sort files and convert to strings
         self.file_list = sorted([str(f) for f in self.file_list])
-        
-        # Apply file index limits
         if self.end_file_index is None:
             self.end_file_index = len(self.file_list)
-        
         self.file_list = self.file_list[self.start_file_index:self.end_file_index]
-        
-        if not self.file_list:
-            raise ValueError(f"No files to process in range [{self.start_file_index}:{self.end_file_index}]")
-    
+
     def _load_metadata(self):
-        """Load metadata from first file using DAS4Whales"""
-        try:
-            self.metadata = dh.get_acquisition_parameters(
-                self.file_list[0], 
-                interrogator=self.interrogator
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to load metadata from {self.file_list[0]}: {e}")
-    
+        self.metadata = dh.get_acquisition_parameters(self.file_list[0], interrogator=self.interrogator)
+
     def _setup_channels(self, start_distance_km, cable_span_km, dx_in_m):
-        """Set up channel selection"""
         nx = self.metadata['nx']
         dx = self.metadata['dx']
         total_length = nx * dx
-
         if start_distance_km < 0:
             start_distance_km = total_length / 1000 + start_distance_km
-        start_channel = max([int(np.floor(start_distance_km * 1000 / dx)), 0])
-
-        if dx_in_m is None or dx_in_m <= self.metadata['dx']:
-            step = 1
-        else:
-            step = int(np.floor(dx_in_m / self.metadata['dx']))
-
+        start_channel = max(int(np.floor(start_distance_km * 1000 / dx)), 0)
+        step = 1 if dx_in_m is None or dx_in_m <= dx else int(np.floor(dx_in_m / dx))
         num_channels = int(np.ceil(cable_span_km * 1000 / dx))
         end_channel = start_channel + num_channels
-
         if end_channel > nx:
             start_channel = nx - num_channels
             end_channel = nx
-
         self.selected_channels = [start_channel, end_channel, step]
-    
+
     def _setup_filter(self):
-        """Create bandpass filter if specified"""
         self.filter_sos = None
         if self.bandpass_filter is not None:
-            try:
-                self.filter_sos = dsp.butterworth_filter(
-                    self.bandpass_filter, 
-                    self.metadata['fs']
-                )
-                print(f"Bandpass filter created: {self.bandpass_filter}")
-            except Exception as e:
-                print(f"Warning: Failed to create filter {self.bandpass_filter}: {e}")
-    
+            self.filter_sos = dsp.butterworth_filter(self.bandpass_filter, self.metadata['fs'])
+        
+    def _init_padding_and_window(self):
+        """
+        Compute samples_per_window and pad sizes based on fs and time_window_s.
+        """
+        fs = self.metadata['fs']
+        raw_samples_per_window = fs * self.time_window_s
+        self.samples_per_window = int(np.floor(raw_samples_per_window))
+
+        fractional = raw_samples_per_window - self.samples_per_window
+        extra_pad_samples = int(np.ceil(fractional) + 1)  # at least 1 sample
+        self.pad_before = extra_pad_samples
+        self.pad_after = extra_pad_samples
+
+    # ------------------------------------------------------------
+    # Data loading
     def _load_file_data(self, file_index):
-        """Load data from a specific file"""
-        if file_index >= len(self.file_list):
-            return False
-        
-        file_path = self.file_list[file_index]
-        
-        try:
-            trace, tx, dist, timestamp = dh.load_das_data(
-                file_path,
-                self.selected_channels,
-                self.metadata,
-                self.interrogator
-            )
-            
-            # Apply bandpass filter if specified
-            if self.filter_sos is not None:
-                import scipy.signal as sp
-                trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
-            
-            self.current_data = trace
-            self.current_time_axis = tx
-            self.current_dist_axis = dist
-            self.current_file_timestamp = timestamp
-            self.current_time_position = 0
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error loading file {file_path}: {e}")
-            return False
-    
-    def _get_next_chunk(self):
-        """Extract next time chunk from current data"""
-        if self.current_data is None:
-            return None
-        
-        dt = 1.0 / self.metadata['fs']
-        samples_per_window = int(self.time_window_s * self.metadata['fs'])
-        
-        # Calculate start and end sample indices
-        start_sample = int(self.current_time_position * self.metadata['fs'])
-        end_sample = start_sample + samples_per_window
-        
-        # Check if we have enough data in current file
-        if start_sample >= self.current_data.shape[1]:
-            return None  # No more data in this file
-        
-        # Adjust end sample if it exceeds available data
-        end_sample = min(end_sample, self.current_data.shape[1])
-        
-        # Extract chunk
-        trace_chunk = self.current_data[:, start_sample:end_sample]
-        time_chunk = self.current_time_axis[start_sample:end_sample] 
-        
-        # Calculate chunk timestamp (file timestamp + time offset)
-        chunk_timestamp = self.current_file_timestamp + pd.Timedelta(seconds=self.current_time_position)
-        
-        # Update position for next chunk
-        self.current_time_position += self.time_window_s
-        
-        return {
-            'trace': trace_chunk,
-            'time_axis': time_chunk,
-            'distance_axis': self.current_dist_axis,
-            'timestamp': chunk_timestamp,
-            'shape': trace_chunk.shape,
-            'duration': time_chunk[-1] - time_chunk[0] if len(time_chunk) > 0 else 0,
-            'channels': self.selected_channels,
-            'filtered': self.filter_sos is not None
-        }
-    
-    def __iter__(self):
-        """Make the loader iterable"""
-        # Reset to beginning
-        self.current_file_index = 0
-        self.current_data = None
-        self.current_time_position = 0
-        return self
-    
-    def __next__(self):
-        """Get next data chunk"""
-        while self.current_file_index < len(self.file_list):
-            # Load current file if not already loaded
-            if self.current_data is None:
-                success = self._load_file_data(self.current_file_index)
-                if not success:
-                    # Skip to next file
-                    self.current_file_index += 1
-                    continue
-            
-            # Try to get next chunk from current file
-            chunk = self._get_next_chunk()
-            
-            if chunk is not None:
-                return chunk
-            else:
-                # No more chunks in current file, move to next file
-                self.current_file_index += 1
-                self.current_data = None
-                self.current_time_position = 0
-        
-        # No more files to process
-        raise StopIteration("No more data chunks available")
-    
-    def get_file_timestamps(self, method='first_only'):
-        """
-        Get timestamps for all files in the dataset.
-        
-        Parameters:
-        -----------
-        method : str
-            'first_only': Load timestamp from first file, calculate others
-            'all': Load timestamp from every file (slow)
-            'filename': Extract from filenames (fast but may be inaccurate)
-        
-        Returns:
-        --------
-        timestamps : list
-            List of pandas Timestamps for each file
-        """
-        timestamps = []
-        
-        if method == 'first_only':
-            # Load first file timestamp and calculate others
-            try:
-                _, _, _, first_timestamp = dh.load_das_data(
-                    self.file_list[0],
-                    [0, min(10, self.metadata['nx']), 1],
-                    self.metadata,
-                    self.interrogator
-                )
-                
-                # Estimate file duration
-                file_duration_s = self.metadata['ns'] / self.metadata['fs']
-                
-                # Calculate timestamps
-                for i in range(len(self.file_list)):
-                    calc_timestamp = first_timestamp + pd.Timedelta(seconds=i * file_duration_s)
-                    timestamps.append(calc_timestamp)
-                    
-            except Exception as e:
-                print(f"Warning: Could not calculate timestamps: {e}")
-                timestamps = self._fallback_timestamps()
-                
-        elif method == 'all':
-            # Load from every file (slow but accurate)
-            print("Loading timestamps from all files (this may take time)...")
-            for file_path in self.file_list:
-                try:
-                    _, _, _, timestamp = dh.load_das_data(
-                        file_path,
-                        [0, min(10, self.metadata['nx']), 1],
-                        self.metadata,
-                        self.interrogator
-                    )
-                    timestamps.append(timestamp)
-                except Exception as e:
-                    print(f"Warning: Could not load timestamp from {file_path}: {e}")
-                    # Use fallback
-                    if timestamps:
-                        # Estimate based on previous timestamp
-                        est_duration = 3600  # 1 hour default
-                        est_timestamp = timestamps[-1] + pd.Timedelta(seconds=est_duration)
-                        timestamps.append(est_timestamp)
-                    else:
-                        timestamps.append(pd.Timestamp.now())
-                        
-        elif method == 'filename':
-            timestamps = self._extract_timestamps_from_filenames()
-            
+        trace, tx, dist, timestamp = dh.load_das_data(
+            self.file_list[file_index], self.selected_channels, self.metadata, self.interrogator
+        )
+        if self.filter_sos is not None:
+            import scipy.signal as sp
+            trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
+        if self.buffer is None:
+            self.buffer = trace
+            self.buffer_time_axis = tx
+            self.buffer_start_timestamp = timestamp
+            self.dist_axis = dist
         else:
-            raise ValueError(f"Unknown timestamp method: {method}")
-        
-        return timestamps
-    
-    def _extract_timestamps_from_filenames(self):
-        """Extract timestamps from filenames using common patterns"""
-        import re
-        timestamps = []
-        
-        for file_path in self.file_list:
-            filename = Path(file_path).stem
-            timestamp = None
-            
-            # Common timestamp patterns
-            patterns = [
-                (r'(\d{8}T\d{6})', '%Y%m%dT%H%M%S'),           # 20230115T143022
-                (r'(\d{8}_\d{6})', '%Y%m%d_%H%M%S'),           # 20230115_143022  
-                (r'(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})', '%Y-%m-%dT%H-%M-%S'),  # 2023-01-15T14-30-22
-                (r'(\d{13})', None),                           # Unix timestamp ms
-                (r'(\d{10})', None),                           # Unix timestamp s
-            ]
-            
-            for pattern, fmt in patterns:
-                match = re.search(pattern, filename)
-                if match:
-                    time_str = match.group(1)
-                    try:
-                        if fmt:
-                            timestamp = pd.to_datetime(time_str, format=fmt)
-                        elif len(time_str) == 13:  # ms
-                            timestamp = pd.to_datetime(int(time_str), unit='ms')
-                        elif len(time_str) == 10:  # s
-                            timestamp = pd.to_datetime(int(time_str), unit='s')
-                        
-                        if timestamp:
-                            break
-                    except:
-                        continue
-            
-            if timestamp is None:
-                # Fallback to file modification time
-                try:
-                    mtime = Path(file_path).stat().st_mtime
-                    timestamp = pd.to_datetime(mtime, unit='s')
-                except:
-                    timestamp = pd.Timestamp.now()
-            
-            timestamps.append(timestamp)
-        
-        return timestamps
-    
-    def _fallback_timestamps(self):
-        """Fallback timestamp generation"""
-        timestamps = []
-        base_time = pd.Timestamp.now()
-        
-        for i in range(len(self.file_list)):
-            # Space files 1 hour apart as default
-            timestamp = base_time + pd.Timedelta(hours=i)
-            timestamps.append(timestamp)
-        
-        return timestamps
-    
-    def get_summary(self):
-        """Get summary information about the dataset"""
+            self.buffer = np.concatenate((self.buffer, trace), axis=1)
+            self.buffer_time_axis = np.concatenate((self.buffer_time_axis, tx))
+        return True
+
+    # ------------------------------------------------------------
+    # Drift-free chunk generation with trimming
+    def _get_next_continuous_chunk(self):
+        fs = self.metadata['fs']
+
+        # First iteration — load starting data & anchor timestamp
+        if self.global_start_timestamp is None:
+            while self.file_index < len(self.file_list) and self.buffer is None:
+                if self._load_file_data(self.file_index):
+                    self.file_index += 1
+                else:
+                    self.file_index += 1
+            if self.buffer is None:
+                return None
+            self.global_start_timestamp = self.buffer_start_timestamp
+            self.global_buffer_start_sample = 0
+            self.window_number = 0
+
+        # Absolute sample indices
+        start_sample = self.window_number * self.samples_per_window
+        end_sample = start_sample + self.samples_per_window + self.pad_before + self.pad_after
+
+        # Relative indices into current buffer
+        rel_start = start_sample - self.global_buffer_start_sample
+        rel_end = end_sample - self.global_buffer_start_sample
+
+        # Load more until we have enough samples
+        while rel_end > self.buffer.shape[1]:
+            if self.file_index >= len(self.file_list):
+                if self.buffer.shape[1] > rel_start + self.samples_per_window:
+                    rel_end = min(rel_end, self.buffer.shape[1])
+                    break
+                else:
+                    return None
+            if self._load_file_data(self.file_index):
+                self.file_index += 1
+            else:
+                self.file_index += 1
+
+        if rel_start >= self.buffer.shape[1]:
+            return None
+
+        # Clip for EOF case
+        rel_end = min(rel_end, self.buffer.shape[1])
+
+        # Slice chunk
+        chunk_trace = self.buffer[:, rel_start:rel_end]
+        chunk_time_axis = self.buffer_time_axis[rel_start:rel_end]
+        chunk_timestamp = self.global_start_timestamp + pd.Timedelta(seconds=start_sample / fs)
+
+        # Advance window
+        self.window_number += 1
+
+        # Trim buffer — keep only what's needed for next chunk
+        next_start_sample = self.window_number * self.samples_per_window
+        retain_from_absolute = max(0, next_start_sample - self.pad_before)
+        drop_count = retain_from_absolute - self.global_buffer_start_sample
+        if drop_count > 0:
+            self.buffer = self.buffer[:, drop_count:]
+            self.buffer_time_axis = self.buffer_time_axis[drop_count:]
+            self.global_buffer_start_sample = retain_from_absolute
+
         return {
-            'input_directory': str(self.input_dir),
-            'interrogator': self.interrogator,
-            'total_files': len(self.file_list),
-            'file_range': (self.start_file_index, self.end_file_index),
-            'selected_channels': self.selected_channels,
-            'time_window_s': self.time_window_s,
-            'original_sampling': {
-                'fs': self.metadata['fs'],
-                'dx': self.metadata['dx'], 
-                'nx': self.metadata['nx'],
-                'ns': self.metadata.get('ns', 'unknown')
-            },
-            'bandpass_filter': self.bandpass_filter,
-            'first_file': self.file_list[0] if self.file_list else None,
-            'last_file': self.file_list[-1] if self.file_list else None
+            "trace": chunk_trace,
+            "time_axis": chunk_time_axis,
+            "distance_axis": self.dist_axis,
+            "timestamp": chunk_timestamp,
+            "channels": self.selected_channels,
+            "filtered": self.filter_sos is not None,
+            "pad_before": self.pad_before,
+            "pad_after": self.pad_after
         }
 
-################################ \ end of Loader class #########################################
+    # ------------------------------------------------------------
+    # Iteration protocol
+    def __iter__(self):
+        self.file_index = 0
+        self.buffer = None
+        self.buffer_time_axis = None
+        self.buffer_start_timestamp = None
+        self.global_start_timestamp = None
+        self.global_buffer_start_sample = None
+        self.dist_axis = None
+        self.window_number = 0
+        return self
 
-def get_chunk_filename(timestamp, extension='.h5'):
-    """Generate standardized chunk filename from timestamp."""
-    return f"{timestamp.strftime('%Y%m%d_%H%M%S')}{extension}"
+    def __next__(self):
+        chunk = self._get_next_continuous_chunk()
+        if chunk is None:
+            raise StopIteration
+        return chunk
+    
+################################ \ end of Loader class #########################################
 
 def save_chunk_h5(filepath, fk_dehyd, timestamp):
     """
@@ -450,7 +261,7 @@ def load_chunk_h5(filepath):
 
 def save_settings_h5(filepath, original_metadata, processing_settings, 
                     sample_nonzeros, sample_shape, f_axis, k_axis,
-                    file_timestamps=None):
+                    file_timestamps=None, file_names=None):
     """
     Save all settings and rehydration info to settings.h5.
     
@@ -472,6 +283,7 @@ def save_settings_h5(filepath, original_metadata, processing_settings,
         Wavenumber axis for target grid
     file_timestamps : list, optional
         List of file start timestamps for navigation
+    file_names: list of strings representing filenames matching each file_timestamp
     """
     with h5py.File(filepath, 'w') as f:
         # Root attributes
@@ -500,7 +312,13 @@ def save_settings_h5(filepath, original_metadata, processing_settings,
         proc_grp = f.create_group('processing_settings')
         for key, value in processing_settings.items():
             try:
-                if isinstance(value, (str, int, float, bool, np.integer, np.floating)):
+                if 'filter' in key:
+                    bp_grp = proc_grp.create_group('bandpass_filter')
+                    bp_grp.create_dataset('filter_order', data=value[0])
+                    bp_grp.create_dataset('cutoff_freqs', data=np.array(value[1]))  # [fc_low, fc_hi]
+                    dt = h5py.string_dtype(encoding='utf-8')
+                    bp_grp.create_dataset('filter_type', data=value[2], dtype=dt)
+                elif isinstance(value, (str, int, float, bool, np.integer, np.floating)):
                     # Save scalars as single-element datasets instead of attributes
                     proc_grp.create_dataset(key, data=value)
                 elif isinstance(value, (list, tuple)):
@@ -527,13 +345,26 @@ def save_settings_h5(filepath, original_metadata, processing_settings,
         axes_grp.create_dataset('wavenumber', data=k_axis, compression='gzip')
         axes_grp['wavenumber'].attrs['units'] = '1/m'
         
-        # File timestamps for navigation (optional)
+        # File timestamps for file mapping (optional)
         if file_timestamps is not None:
-            nav_grp = f.create_group('navigation')
-            dt = h5py.string_dtype(encoding='utf-8')
-            timestamp_strs = [pd.Timestamp(ts).isoformat() for ts in file_timestamps]
-            nav_grp.create_dataset('file_start_times', data=timestamp_strs, dtype=dt)
-            nav_grp.attrs['total_files'] = len(file_timestamps)
+            if 'file_names' not in locals():
+                raise ValueError("Need to provide file_names list along with file_timestamps")
+
+            # Define structured dtype: timestamp as float64, filename as UTF-8 string
+            dt = np.dtype([
+                ('timestamp', 'f8'),  # POSIX seconds
+                ('filename', h5py.string_dtype(encoding='utf-8'))
+            ])
+
+            # Build structured array from provided lists
+            table_data = np.array([
+                (pd.Timestamp(ts).timestamp(), fname)
+                for ts, fname in zip(file_timestamps, file_names)
+            ], dtype=dt)
+
+            # Save at root level as 'file_map'
+            f.create_dataset('file_map', data=table_data)
+            f['file_map'].attrs['total_files'] = len(table_data)
 
         print(f"Settings saved to {filepath}")
         print(f"  - Original metadata: {len(original_metadata)} items")
@@ -580,14 +411,22 @@ def load_settings_preprocessed_h5(filepath):
             grp = f['processing_settings']
             
             for key in grp.keys():
-                data = grp[key][...]
-                # Convert single-element arrays back to scalars if appropriate
-                if isinstance(data, np.ndarray) and data.size == 1 and data.dtype.kind in 'biufc':
-                    proc_settings[key] = data.item()
-                elif isinstance(data, bytes):
-                    proc_settings[key] = data.decode()
+                if isinstance(grp[key], h5py.Group):  # it's a subgroup
+                    if key == 'bandpass_filter':
+                        bp_grp = grp['bandpass_filter']
+                        filter_order = bp_grp['filter_order'][()]
+                        cutoff_freqs = bp_grp['cutoff_freqs'][...]
+                        filter_type = bp_grp['filter_type'][()].decode() \
+                            if isinstance(bp_grp['filter_type'][()], bytes) else bp_grp['filter_type'][()]
+                        proc_settings['bandpass_filter'] = [filter_order, list(cutoff_freqs), filter_type]
                 else:
-                    proc_settings[key] = data
+                    data = grp[key][...]
+                    if isinstance(data, np.ndarray) and data.size == 1 and data.dtype.kind in 'biufc':
+                        proc_settings[key] = data.item()
+                    elif isinstance(data, bytes):
+                        proc_settings[key] = data.decode()
+                    else:
+                        proc_settings[key] = data
             
             settings_data['processing_settings'] = proc_settings
         
@@ -607,13 +446,15 @@ def load_settings_preprocessed_h5(filepath):
                 'wavenumber': axes_grp['wavenumber'][...]
             }
         
-        # Load file timestamps
-        if 'navigation' in f:
-            nav_grp = f['navigation']
-            timestamps_str = [ts.decode() if isinstance(ts, bytes) else ts 
-                            for ts in nav_grp['file_start_times']]
-            settings_data['file_timestamps'] = [pd.Timestamp(ts) for ts in timestamps_str]
-        
+        # Load file_map (structured array)
+        if 'file_map' in f:
+            table = f['file_map'][...]  # structured array
+            timestamps = table['timestamp']  # numpy array of floats
+            filenames = table['filename']    # numpy array of strings
+            # Convert to list of (datetime, filename)
+            settings_data['file_map'] = [
+                (pd.Timestamp.fromtimestamp(ts), fname) for ts, fname in zip(timestamps, filenames)
+            ]
         return settings_data
 
 def load_preprocessed_h5(filepath):

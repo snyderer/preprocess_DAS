@@ -1,0 +1,2 @@
+h5py
+DAS4Whales@ git+https://github.com/snyderer/DAS4Whales@ericsBranch

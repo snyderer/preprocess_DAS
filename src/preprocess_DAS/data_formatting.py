@@ -10,92 +10,72 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy import ndimage
 from scipy.signal import windows
 from scipy import signal as sp
+import pandas as pd
 #import das4whales as dw # only need once I start using das4whales to generate F-K mask
 
-def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk'):
-    """
-    Interpolates data in space and time using f-k domain interpolation.
-    
-    Parameters:
-    -----------
-    data : np.ndarray
-        2D numpy array (space x time)
-    dx : float
-        Original spatial sampling interval (m)
-    fs : float
-        Original sampling rate (Hz)
-    new_dx : float
-        Desired spatial sampling interval (m)
-    new_fs : float
-        Desired sampling rate (Hz)
-    output_format : str
-        'fk' returns data in f-k domain, 'tx' returns data back in time-space domain
-    
-    Returns:
-    --------
-    If output_format='fk':
-        Dfk : np.ndarray
-            Interpolated f-k domain data
-        f_new : np.ndarray
-            New frequency axis
-        k_new : np.ndarray
-            New wavenumber axis
-    If output_format='tx':
-        tr : np.ndarray
-            Interpolated time-space data
-        t : np.ndarray
-            New time axis
-        x : np.ndarray
-            New space axis
-    """
+def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk',
+                   pad=0, chunk_timestamp=None, time_window_s=None):
+    dt = 1 / fs
+    new_dt = 1 / new_fs
+
+    if data.shape[1] == 0:
+        raise ValueError("fk_interpolate received data with zero time samples.")
+
     # FFT to f–k space
     D = np.fft.fftshift(np.fft.fft2(data))
     nk, nt = D.shape
-    dt = 1/fs
-    new_dt = 1/new_fs
-    
-    # Original axes
+
     k = np.fft.fftshift(np.fft.fftfreq(nk, d=dx))
     f = np.fft.fftshift(np.fft.fftfreq(nt, d=dt))
-    
-    # Target axes
-    new_nk = int(nk * dx / new_dx)
-    new_nt = int(nt * dt / new_dt)
+
+    new_nk = int(round(nk * dx / new_dx))
+    new_nt_raw = int(round(nt * dt / new_dt))
+
     k_new = np.fft.fftshift(np.fft.fftfreq(new_nk, d=new_dx))
-    f_new = np.fft.fftshift(np.fft.fftfreq(new_nt, d=new_dt))
-    
-    # Anti-aliasing: zero out frequencies/wavenumbers that can't be represented
-    k_max_new = np.max(np.abs(k_new))
-    f_max_new = np.max(np.abs(f_new))
-    D[np.abs(k) > k_max_new, :] = 0
-    D[:, np.abs(f) > f_max_new] = 0
-    
-    # Calculate scaling factors to preserve amplitude
-    # This accounts for the change in sampling intervals
-    scale_factor = (dx/new_dx) * (dt/new_dt)
-    
-    # Interpolate in f-k domain
+    f_new = np.fft.fftshift(np.fft.fftfreq(new_nt_raw, d=new_dt))
+
+    # Anti-alias
+    D[np.abs(k) > np.max(np.abs(k_new)), :] = 0
+    D[:, np.abs(f) > np.max(np.abs(f_new))] = 0
+
+    from scipy.interpolate import RegularGridInterpolator
     interp = RegularGridInterpolator((k, f), D, bounds_error=False, fill_value=0)
     K, F = np.meshgrid(k_new, f_new, indexing='ij')
-    Dfk = interp(np.stack([K.ravel(), F.ravel()], axis=-1)).reshape(K.shape)
+    Dfk_full = interp(np.stack([K.ravel(), F.ravel()], axis=-1)).reshape(K.shape)
     
-    # Apply scaling factor
-    Dfk *= scale_factor
-    
+    scale_factor = (dx / new_dx) * (dt / new_dt)
+    Dfk_full *= scale_factor
+
+    # Phase correction for pad
+    if chunk_timestamp is not None and pad > 0:
+        time_shift_sec = pad * dt
+        phase_shift = np.exp(-2j * np.pi * f_new * time_shift_sec)
+        Dfk_full *= phase_shift[np.newaxis, :]
+
+    # Crop
+    if time_window_s is not None:
+        total_samples_needed = int(round(new_fs * time_window_s))
+        start_idx = int(round(pad * (new_fs / fs)))
+        if start_idx >= Dfk_full.shape[1]:
+            raise ValueError(f"Pad start index {start_idx} exceeds data length {Dfk_full.shape[1]}")
+        end_idx = min(start_idx + total_samples_needed, Dfk_full.shape[1])
+        if end_idx - start_idx <= 0:
+            raise ValueError("Cropped fk_interpolate output has zero length.")
+        Dfk_full = Dfk_full[:, start_idx:end_idx]
+        f_new = f_new[start_idx:end_idx]
+
     if output_format == 'fk':
-        return Dfk, f_new, k_new
+        return Dfk_full, f_new, k_new
     elif output_format == 'tx':
-        tr = np.fft.ifft2(np.fft.ifftshift(Dfk)).real
+        tr = np.fft.ifft2(np.fft.ifftshift(Dfk_full)).real
         t = np.arange(tr.shape[1]) * new_dt
-        x = np.arange(tr.shape[0]) * new_dxF
+        x = np.arange(tr.shape[0]) * new_dx
         return tr, t, x
-    else:
-        raise ValueError('output_format must be "fk" or "tx"')
 
 def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=7000,  
                    fmin=15, fmax=90, df_taper=14, return_half = True, fft_shift = True):
     """
-    create an fk filter mask using das4whales
+    create an fk filter mask
 
     Parameters:
     -----------
@@ -245,7 +225,6 @@ def taper_constant(fk_mask, mask_type = 'tukey', widening_factor=.01, **kwargs):
     fk_mask_tapered *= full_image_mask
 
     return fk_mask_tapered
-
 
 def dehydrate_fk(fk_data, mask):
     """

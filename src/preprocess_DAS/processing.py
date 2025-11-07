@@ -87,6 +87,7 @@ def process_directory(input_dir, output_dir, interrogator, settings,
             input_dir, interrogator, 
             start_distance_km=settings['start_distance'], 
             cable_span_km=settings['cable_span'], 
+            use_full_cable=settings['use_full_cable'],
             dx_in_m=None,
             time_window_s=settings['twin_sec'], 
             start_file_index=start_file_index, 
@@ -101,6 +102,9 @@ def process_directory(input_dir, output_dir, interrogator, settings,
         sample_shape = None
         f_axis = None
         k_axis = None
+
+        file_timestamps = []
+        filenames = []
         
         if verbose:
             print("Starting chunk processing...")
@@ -114,10 +118,17 @@ def process_directory(input_dir, output_dir, interrogator, settings,
                 print(f"Processing chunk {chunk_iter}: {timestamp} (shape: {trace.shape})")
             
             # Interpolate to target grid
-            try:
+            try:                                
                 Dfk, f_new, k_new = df.fk_interpolate(
-                    trace, loader.metadata['dx'], loader.metadata['fs'], 
-                    settings['dx'], settings['fs'], output_format='fk'
+                    trace,
+                    loader.metadata['dx'],
+                    loader.metadata['fs'],
+                    settings['dx'],
+                    settings['fs'],
+                    output_format='fk',
+                    pad=chunk['pad_before'],
+                    chunk_timestamp=timestamp,
+                    time_window_s=settings['twin_sec']
                 )
                 
                 Dfk_pos = Dfk[:, len(f_new)//2-1:]
@@ -162,6 +173,9 @@ def process_directory(input_dir, output_dir, interrogator, settings,
             chunk_filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}.h5"
             outfile = output_dir / chunk_filename
             
+            file_timestamps.append(timestamp)
+            filenames.append(chunk_filename)
+
             io.save_chunk_h5(outfile, fk_dehyd, timestamp.timestamp())
             
             # Display progress
@@ -174,16 +188,7 @@ def process_directory(input_dir, output_dir, interrogator, settings,
         # Save settings after processing all chunks
         if verbose:
             print(f"\nProcessed {chunk_iter} chunks. Saving settings...")
-        
-        try:
-            file_timestamps = loader.get_file_timestamps(method='first_only')
-        except Exception as e:
-            if verbose:
-                print(f"Warning: Could not get file timestamps: {e}")
-            err_message = "Error retreiving file timestamps"
-            log_error(logger, err_message, e, include_traceback=True)
-            file_timestamps = None
-        
+            
         settings_file = output_dir / "settings.h5"
         try:
             settings['selected_channels'] = loader.selected_channels
@@ -195,7 +200,8 @@ def process_directory(input_dir, output_dir, interrogator, settings,
                 sample_shape,
                 f_axis,
                 k_axis,
-                file_timestamps
+                file_timestamps,
+                filenames
             )
         except Exception as e:
             err_message = "error saving settings"

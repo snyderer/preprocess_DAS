@@ -2,6 +2,8 @@ Metadata-Version: 2.4
 Name: preprocess-DAS
 Version: 0.1.0
 Summary: Tools for DAS data preprocessing
-Author-email: Your Name <you@example.com>
+Author-email: "Dr. Eric R. Snyder" <esnyder@cornell.edu>
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
+Requires-Dist: h5py
+Requires-Dist: DAS4Whales@ git+https://github.com/snyderer/DAS4Whales@ericsBranch
