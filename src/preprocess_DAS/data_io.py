@@ -8,6 +8,7 @@ Includes loader class for DAS4Whales integration and HDF5 save/load functions.
 import os
 import numpy as np
 import pandas as pd
+import scipy.signal as sp
 from pathlib import Path
 import h5py
 #import das4whales as dw
@@ -118,7 +119,6 @@ class Loader:
             self.file_list[file_index], self.selected_channels, self.metadata, self.interrogator
         )
         if self.filter_sos is not None:
-            import scipy.signal as sp
             trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
         if self.buffer is None:
             self.buffer = trace
