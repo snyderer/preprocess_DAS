@@ -15,6 +15,10 @@ import pandas as pd
 
 def fk_interpolate(data, dx, fs, new_dx, new_fs, output_format='fk',
                    pad=0, chunk_timestamp=None, time_window_s=None):
+    
+    # Use single precision to reduce memory footprint
+    data = data.astype(np.float32, copy=False)
+
     dt = 1 / fs
     new_dt = 1 / new_fs
 
@@ -104,7 +108,7 @@ def create_fk_mask(shape, dx, fs, cs_min=1300, cp_min=1460, cp_max=6000, cs_max=
     # design butterworth filter for taper edges:
     b, a = sp.butter(8, [fmin/(fs/2), fmax/(fs/2)], 'bp')
     _, h = sp.freqz(b, a, worN=freq, fs=fs)
-    H = np.abs(h)**2
+    H = (np.abs(h)**2).astype(np.float32)
     
     fk_mask = np.tile(H, (len(knum), 1))
     

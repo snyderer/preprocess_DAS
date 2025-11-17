@@ -17,20 +17,16 @@ import preprocess_DAS.data_formatting as df
 
 class Loader:
     """
-    Continuous DAS data loader with buffer, edge padding, drift-free chunking.
-    Compatible with existing process_directory pipeline.
+    Continuous DAS data loader with optional buffer, edge padding, drift-free chunking.
+    Now has automatic 'no-buffer' mode if file duration exactly matches twin_sec.
     """
 
-    def __init__(self, input_dir, interrogator='optasense', 
-                 start_distance_km=-40.01, cable_span_km=40, 
-                 use_full_cable = False, dx_in_m=None,
-                 time_window_s=30, start_file_index=0, 
+    def __init__(self, input_dir, interrogator='optasense',
+                 start_distance_km=-40.01, cable_span_km=40,
+                 use_full_cable=False, dx_in_m=None,
+                 time_window_s=30, start_file_index=0,
                  end_file_index=None, bandpass_filter=None):
-        """
-        input_dir : input directory
-        interrogator : tells DAS4Whales what interrogator to use
-        start_distance_km = location of start segment
-        """
+
         self.input_dir = Path(input_dir)
         self.interrogator = interrogator
         self.time_window_s = time_window_s
@@ -40,30 +36,46 @@ class Loader:
 
         self._get_file_list()
         self._load_metadata()
-        
         self._setup_channels(start_distance_km, cable_span_km, dx_in_m)
         if use_full_cable:
             self.selected_channels[0] = 0
             self.selected_channels[1] = self.metadata['nx']
 
-        # correct bandpass_filter settings if sampling rate is too low:
-        if self.bandpass_filter is not None and self.bandpass_filter[1][1]>self.metadata['fs']:
-            self.bandpass_filter[1][1] = int(np.floor(self.metadata['fs']/2)-2)
+        # Correct bandpass_filter settings if sampling rate is too high:
+        if self.bandpass_filter is not None and self.bandpass_filter[1][1] > self.metadata['fs']:
+            self.bandpass_filter[1][1] = int(np.floor(self.metadata['fs'] / 2) - 2)
         self._setup_filter()
-        self._init_padding_and_window()  # NEW padding/window init
-        
-        # Iteration state
+
+        # ---- Decide whether to use buffer ----
+        raw_samples_per_window = self.metadata['fs'] * self.time_window_s
+        self.samples_per_window = int(round(raw_samples_per_window))
+        self.use_buffer = not np.isclose(raw_samples_per_window, self.samples_per_window)
+
+        # Also check that the first file duration matches desired window:
+        try:
+            nt_first = self.metadata.get('nt', None)  # # of samples in first file
+            if nt_first is not None and nt_first != self.samples_per_window:
+                self.use_buffer = True
+        except Exception:
+            self.use_buffer = True
+
+        if self.use_buffer:
+            self._init_padding_and_window()
+        else:
+            self.pad_before = 0
+            self.pad_after = 0
+
+        # --- Iteration state ---
         self.file_index = 0
         self.buffer = None
         self.buffer_time_axis = None
         self.buffer_start_timestamp = None
-        self.global_start_timestamp = None  # anchor for drift-free timestamps
+        self.global_start_timestamp = None
         self.global_buffer_start_sample = None
         self.dist_axis = None
         self.window_number = 0
 
     # ------------------------------------------------------------
-    # Setup methods (same as before)
     def _get_file_list(self):
         extensions = ['.h5', '.hdf5', '.tdms']
         self.file_list = []
@@ -98,26 +110,21 @@ class Loader:
         self.filter_sos = None
         if self.bandpass_filter is not None:
             self.filter_sos = dsp.butterworth_filter(self.bandpass_filter, self.metadata['fs'])
-        
+
     def _init_padding_and_window(self):
-        """
-        Compute samples_per_window and pad sizes based on fs and time_window_s.
-        """
         fs = self.metadata['fs']
         raw_samples_per_window = fs * self.time_window_s
         self.samples_per_window = int(np.floor(raw_samples_per_window))
-
         fractional = raw_samples_per_window - self.samples_per_window
         extra_pad_samples = int(np.ceil(fractional) + 1)  # at least 1 sample
         self.pad_before = extra_pad_samples
         self.pad_after = extra_pad_samples
 
-    # ------------------------------------------------------------
-    # Data loading
     def _load_file_data(self, file_index):
         trace, tx, dist, timestamp = dh.load_das_data(
             self.file_list[file_index], self.selected_channels, self.metadata, self.interrogator
         )
+        trace = trace.astype(np.float32, copy=False)
         if self.filter_sos is not None:
             trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
         if self.buffer is None:
@@ -131,11 +138,31 @@ class Loader:
         return True
 
     # ------------------------------------------------------------
-    # Drift-free chunk generation with trimming
+    # No-buffer mode: just read one file and return as a chunk
+    def _get_next_whole_file_chunk(self):
+        if self.file_index >= len(self.file_list):
+            return None
+        trace, tx, dist, timestamp = dh.load_das_data(
+            self.file_list[self.file_index], self.selected_channels, self.metadata, self.interrogator
+        )
+        if self.filter_sos is not None:
+            trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
+        self.file_index += 1
+        return {
+            "trace": trace,
+            "time_axis": tx,
+            "distance_axis": dist,
+            "timestamp": timestamp,
+            "channels": self.selected_channels,
+            "filtered": self.filter_sos is not None,
+            "pad_before": 0,
+            "pad_after": 0
+        }
+
+    # Buffer mode: original continuous chunk logic
     def _get_next_continuous_chunk(self):
         fs = self.metadata['fs']
 
-        # First iteration — load starting data & anchor timestamp
         if self.global_start_timestamp is None:
             while self.file_index < len(self.file_list) and self.buffer is None:
                 if self._load_file_data(self.file_index):
@@ -148,15 +175,12 @@ class Loader:
             self.global_buffer_start_sample = 0
             self.window_number = 0
 
-        # Absolute sample indices
         start_sample = self.window_number * self.samples_per_window
         end_sample = start_sample + self.samples_per_window + self.pad_before + self.pad_after
 
-        # Relative indices into current buffer
         rel_start = start_sample - self.global_buffer_start_sample
         rel_end = end_sample - self.global_buffer_start_sample
 
-        # Load more until we have enough samples
         while rel_end > self.buffer.shape[1]:
             if self.file_index >= len(self.file_list):
                 if self.buffer.shape[1] > rel_start + self.samples_per_window:
@@ -172,18 +196,13 @@ class Loader:
         if rel_start >= self.buffer.shape[1]:
             return None
 
-        # Clip for EOF case
         rel_end = min(rel_end, self.buffer.shape[1])
 
-        # Slice chunk
         chunk_trace = self.buffer[:, rel_start:rel_end]
         chunk_time_axis = self.buffer_time_axis[rel_start:rel_end]
         chunk_timestamp = self.global_start_timestamp + pd.Timedelta(seconds=start_sample / fs)
-
-        # Advance window
         self.window_number += 1
 
-        # Trim buffer — keep only what's needed for next chunk
         next_start_sample = self.window_number * self.samples_per_window
         retain_from_absolute = max(0, next_start_sample - self.pad_before)
         drop_count = retain_from_absolute - self.global_buffer_start_sample
@@ -204,7 +223,6 @@ class Loader:
         }
 
     # ------------------------------------------------------------
-    # Iteration protocol
     def __iter__(self):
         self.file_index = 0
         self.buffer = None
@@ -217,7 +235,10 @@ class Loader:
         return self
 
     def __next__(self):
-        chunk = self._get_next_continuous_chunk()
+        if self.use_buffer:
+            chunk = self._get_next_continuous_chunk()
+        else:
+            chunk = self._get_next_whole_file_chunk()
         if chunk is None:
             raise StopIteration
         return chunk

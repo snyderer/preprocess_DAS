@@ -111,7 +111,7 @@ def process_directory(input_dir, output_dir, interrogator, settings,
         
         # Process each chunk
         for chunk in loader:
-            trace = chunk['trace']
+            trace = chunk['trace'].astype(np.float32)
             timestamp = chunk['timestamp']
             
             if verbose:
@@ -131,15 +131,17 @@ def process_directory(input_dir, output_dir, interrogator, settings,
                     time_window_s=settings['twin_sec']
                 )
                 
-                Dfk_pos = Dfk[:, len(f_new)//2-1:]
             except Exception as e:
                 if verbose:
                     print(f"Warning: Failed Interpolation: {e}")
                 err_message = f"error processing data in {timestamp}"
                 log_error(logger, err_message, e, include_traceback=True)
+            
+            del trace # delete trace to reduce demands on RAM
+            
             # Create F-K mask on first iteration
             if chunk_iter == 0:
-                nx, nf = Dfk_pos.shape
+                nx, nf = Dfk.shape
                 
                 if verbose:
                     print(f"Creating F-K mask for grid size: {nx} x {nf}")
@@ -158,17 +160,19 @@ def process_directory(input_dir, output_dir, interrogator, settings,
                     mask_efficiency = np.sum(fk_mask) / np.prod(fk_mask.shape)
                     print(f"F-K mask created: {np.sum(fk_mask)}/{np.prod(fk_mask.shape)} elements kept ({mask_efficiency:.4f})")
             
-            # Dehydrate
-            fk_dehyd, nonzeros, shape = df.dehydrate_fk(Dfk_pos, fk_mask)
-            
-            # Store template info from first chunk
-            if chunk_iter == 0:
-                sample_nonzeros = nonzeros
+                Dfk = Dfk[:, len(f_new)//2-1:] # only positive frequencies
+                fk_dehyd, nonzeros, shape = df.dehydrate_fk(Dfk, fk_mask) # Dehydrate and get nonzeros and shape for settings.h5
+
+                # Store template info from first chunk
+                sample_nonzeros = nonzeros 
                 sample_shape = shape
                 
                 if verbose:
                     print(f"Template stored: shape={shape}, nonzeros={np.sum(nonzeros)}")
-            
+            else:
+                Dfk = Dfk[:, len(f_new)//2-1:] # store only positive frequencies
+                fk_dehyd, _, _ = df.dehydrate_fk(Dfk, fk_mask) # Dehydrate, do not retrieve nonzeros or shape
+            del Dfk
             # Generate output filename and save
             chunk_filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}.h5"
             outfile = output_dir / chunk_filename
