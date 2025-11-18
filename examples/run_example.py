@@ -6,7 +6,7 @@ import numpy as np
 
 dataset = 'medsea_full'
 # dataset = 'ooi_optasense_north_c3_full'
-mode = 'testing'    # processing or testing
+mode = 'processing'    # processing or testing
 
 settings = {
     'fs': 200,
@@ -28,7 +28,7 @@ if mode=='testing':
     outDataDir = r'C:\Users\ers334\Desktop\testingData'
 elif mode=='processing':
     rootDataDir = r'\\ccb-qnap.nas.ornith.cornell.edu\CCB\projects\2022_CLOCCB_OR_S1113'
-    outDataDir = r'H:'
+    outDataDir = r'F:'
 
 if "full" not in dataset.lower(): # a range has been defined
     sectionID = int(dataset[-1])
