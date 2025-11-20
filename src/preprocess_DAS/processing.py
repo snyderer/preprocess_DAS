@@ -155,7 +155,7 @@ def process_directory(input_dir, output_dir, interrogator, settings,
             outfile = output_dir / chunk_filename
             file_timestamps.append(timestamp)
             filenames.append(chunk_filename)
-            io.save_chunk_h5(outfile, fk_dehyd, timestamp.timestamp())
+            io.save_chunk_h5(outfile, fk_dehyd, timestamp)
 
             # --- SAVE STATE after each chunk ---
             state_data = {

@@ -14,6 +14,7 @@ import h5py
 #import das4whales as dw
 from das4whales import data_handle as dh, dsp
 import preprocess_DAS.data_formatting as df
+from datetime import datetime, timezone
 
 class Loader:
     """
@@ -256,13 +257,13 @@ def save_chunk_h5(filepath, fk_dehyd, timestamp):
     fk_dehyd : np.ndarray
         1D array of dehydrated F-K values
     """
-    posix_ts = pd.Timestamp(timestamp).timestamp()
+    unix_timestamp = timestamp.replace(tzinfo=timezone.utc).timestamp()
     with h5py.File(filepath, 'w') as f:
         f.create_dataset('fk_dehyd', data=fk_dehyd, 
                         compression='gzip', compression_opts=6)
         f.attrs['version'] = '1.0'
         f.attrs['n_values'] = len(fk_dehyd)
-        f.create_dataset('timestamp', data=posix_ts)
+        f.create_dataset('timestamp', data=unix_timestamp)
 
 def load_chunk_h5(filepath):
     """

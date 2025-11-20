@@ -49,4 +49,4 @@ def fix_all_timestamps_in_dir(directory):
         fix_timestamp_in_chunk(file)
 
 # Usage
-fix_all_timestamps_in_dir(r"F:\medsea_full")
+fix_all_timestamps_in_dir(r"F:\ooi_optasense_north_c2_full")
