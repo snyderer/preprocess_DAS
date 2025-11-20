@@ -6,7 +6,7 @@ import numpy as np
 
 dataset = 'medsea_full'
 # dataset = 'ooi_optasense_north_c3_full'
-mode = 'processing'    # processing or testing
+mode = 'testing'    # processing or testing
 
 settings = {
     'fs': 200,
@@ -19,7 +19,7 @@ settings = {
     'cp_min': 1480,
     'cp_max': 6000, 
     'cs_max': 7000,
-    'f_min': 15,
+    'f_min': 10,
     'f_max': 90,
     'bandpass_filter': [5, [10, 90], 'bp'] # filter order, [lower cutoff, upper cutoff], filter type ('bp', 'hp')
 }
@@ -38,6 +38,9 @@ if 'svalbard' in dataset.lower():
     input_dir = os.path.join(rootDataDir, r'Svalbard\data')
     output_dir = os.path.join(outDataDir, dataset)
     interrogator = 'asn'
+    settings['use_full_cable'] = False
+    settings['start_distance'] = 40
+    settings['cable_span'] = 60
 elif 'ooi_optasense_north' in dataset.lower():
     if 'c2' in dataset: 
         cnum = 2

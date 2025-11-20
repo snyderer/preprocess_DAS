@@ -256,12 +256,13 @@ def save_chunk_h5(filepath, fk_dehyd, timestamp):
     fk_dehyd : np.ndarray
         1D array of dehydrated F-K values
     """
+    posix_ts = pd.Timestamp(timestamp).timestamp()
     with h5py.File(filepath, 'w') as f:
         f.create_dataset('fk_dehyd', data=fk_dehyd, 
                         compression='gzip', compression_opts=6)
         f.attrs['version'] = '1.0'
         f.attrs['n_values'] = len(fk_dehyd)
-        f.create_dataset('timestamp', data=timestamp)
+        f.create_dataset('timestamp', data=posix_ts)
 
 def load_chunk_h5(filepath):
     """
