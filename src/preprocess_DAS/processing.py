@@ -78,6 +78,21 @@ def process_directory(input_dir, output_dir, interrogator, settings,
             bandpass_filter=settings.get('bandpass_filter')
         )
 
+        # initialize settings.h5 (if not already extant)
+        settings_h5_path = output_dir / "settings.h5"
+        if not settings_h5_path.exists():
+            io.save_settings_h5(
+                settings_h5_path,
+                loader.metadata,
+                settings,
+                sample_nonzeros=np.array([]),  # placeholder empty
+                sample_shape=(0, 0),           # placeholder
+                f_axis=np.array([]),
+                k_axis=np.array([]),
+                file_timestamps=[],
+                file_names=[]
+            )
+
         # Skip ahead inside loader if resuming mid-file
         if resume_window_number > 0:
             if verbose:
@@ -104,6 +119,16 @@ def process_directory(input_dir, output_dir, interrogator, settings,
         for chunk in loader:
             trace = chunk['trace']
             timestamp = chunk['timestamp']
+
+            expected_samples = int(settings['twin_sec'] * loader.metadata['fs'])
+            if trace.shape[1] < expected_samples:   # trace shape doesn't match expected number of samples
+                if chunk.get("is_last_chunk", False): 
+                    # it's the last data chunk -- too few samples to make full processing window. End processing.
+                    if verbose:
+                        print(f"Skipping last incomplete chunk ({trace.shape[1]} / {expected_samples}) at {timestamp}")
+                    continue
+                else:
+                    raise ValueError(f"Chunk at {timestamp} is shorter than expected ({trace.shape[1]} / {expected_samples}). Possible bug.")
 
             if verbose:
                 print(f"Processing chunk {chunk_iter}: {timestamp} (shape: {trace.shape})")
@@ -156,7 +181,8 @@ def process_directory(input_dir, output_dir, interrogator, settings,
             file_timestamps.append(timestamp)
             filenames.append(chunk_filename)
             io.save_chunk_h5(outfile, fk_dehyd, timestamp)
-
+            io.append_file_map_h5(settings_h5_path, timestamp, chunk_filename)
+            
             # --- SAVE STATE after each chunk ---
             state_data = {
                 "last_processed": {

@@ -5,8 +5,9 @@ from preprocess_DAS import processing
 import numpy as np
 
 # dataset = 'medsea_full'
-dataset = 'ooi_optasense_north_c2_full'
-mode = 'testing'    # processing or testing
+# dataset = 'ooi_optasense_north_c2_full'
+dataset = 'ooi_optasense_south_c1_full'
+mode = 'processing'    # processing or testing
 
 settings = {
     'fs': 200,
@@ -28,7 +29,7 @@ if mode=='testing':
     outDataDir = r'C:\Users\ers334\Desktop\testingData'
 elif mode=='processing':
     rootDataDir = r'\\ccb-qnap.nas.ornith.cornell.edu\CCB\projects\2022_CLOCCB_OR_S1113'
-    outDataDir = r'F:'
+    outDataDir = r'D:'
 
 if "full" not in dataset.lower(): # a range has been defined
     sectionID = int(dataset[-1])
@@ -53,13 +54,11 @@ elif 'ooi_optasense_north' in dataset.lower():
     settings['cable_span'] = 76.990
     settings['start_distance'] = 20
 elif 'ooi_optasense_south' in dataset.lower():
-    if 'c2' in dataset: 
-        cnum = 2
-    elif 'c3' in dataset:
-        cnum = 3
+    cnum = 1
     input_dir = os.path.join(rootDataDir, r'OOI\DASData\OptaSense\South_C'+str(cnum))
     output_dir = os.path.join(outDataDir, dataset)
     interrogator='optasense'
+    settings['use_full_cable'] = False
     settings['cable_span'] = 46.566
     settings['start_distance'] = 20
 elif 'medsea' in dataset.lower():

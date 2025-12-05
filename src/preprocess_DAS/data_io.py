@@ -148,6 +148,10 @@ class Loader:
         )
         if self.filter_sos is not None:
             trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
+        
+        # Check if this chunk is the very last one
+        is_last_chunk = (self.file_index + 1 >= len(self.file_list))
+
         self.file_index += 1
         return {
             "trace": trace,
@@ -157,7 +161,8 @@ class Loader:
             "channels": self.selected_channels,
             "filtered": self.filter_sos is not None,
             "pad_before": 0,
-            "pad_after": 0
+            "pad_after": 0,
+            "is_last_chunk": is_last_chunk
         }
 
     # Buffer mode: original continuous chunk logic
@@ -212,6 +217,11 @@ class Loader:
             self.buffer_time_axis = self.buffer_time_axis[drop_count:]
             self.global_buffer_start_sample = retain_from_absolute
 
+        # Detect last chunk: we're at end of files and rel_end == buffer length
+        is_last_chunk = False
+        if self.file_index >= len(self.file_list) and rel_end >= self.buffer.shape[1]:
+            is_last_chunk = True
+
         return {
             "trace": chunk_trace,
             "time_axis": chunk_time_axis,
@@ -220,7 +230,8 @@ class Loader:
             "channels": self.selected_channels,
             "filtered": self.filter_sos is not None,
             "pad_before": self.pad_before,
-            "pad_after": self.pad_after
+            "pad_after": self.pad_after,
+            "is_last_chunk": is_last_chunk
         }
 
     # ------------------------------------------------------------
@@ -509,3 +520,87 @@ def load_rehydrate_preprocessed_h5(filepath, settings_data = None, return_format
         f = np.fft.rfftfreq(data.shape[1], d=1/settings_data['processing_settings']['fs'])
         k = np.fft.fftshift(np.fft.fftfreq(data.shape[0], d=settings_data['processing_settings']['dx']))
         return data, f, k, timestamp
+    
+def rebuild_file_map_h5(settings_h5_path, chunks_dir):
+    """
+    Scan all chunk .h5 files in chunks_dir and write file_map dataset
+    into settings.h5 (overwriting if it exists).
+
+    Parameters
+    ----------
+    settings_h5_path : str or Path
+        Path to settings.h5 file
+    chunks_dir : str or Path
+        Path to directory containing chunk .h5 files
+    """
+    settings_h5_path = Path(settings_h5_path)
+    chunks_dir = Path(chunks_dir)
+
+    if not settings_h5_path.exists():
+        raise FileNotFoundError(f"settings.h5 not found at {settings_h5_path}")
+
+    # Build structured array for file_map
+    chunk_files = sorted(chunks_dir.glob("*.h5"))
+    file_map_entries = []
+    for filepath in chunk_files:
+        if filepath.name == "settings.h5":
+            continue
+        try:
+            with h5py.File(filepath, "r") as f:
+                ts = f["timestamp"][()]  # POSIX seconds
+            file_map_entries.append(
+                (float(ts), filepath.name)
+            )
+        except Exception as e:
+            print(f"[WARNING] Could not read {filepath}: {e}")
+
+    # Create structured numpy array
+    dt = np.dtype([
+        ("timestamp", "f8"),  # float64 POSIX timestamp
+        ("filename", h5py.string_dtype(encoding='utf-8'))
+    ])
+    file_map_array = np.array(file_map_entries, dtype=dt)
+
+    # Write to settings.h5
+    with h5py.File(settings_h5_path, "a") as f:
+        if "file_map" in f:
+            del f["file_map"]  # remove old
+        f.create_dataset("file_map", data=file_map_array)
+        f["file_map"].attrs["total_files"] = len(file_map_array)
+
+    print(f"[SETTINGS] Rebuilt file_map with {len(file_map_array)} entries in {settings_h5_path}")
+
+
+def append_file_map_h5(settings_h5_path, timestamp, filename):
+    """
+    Append a single (timestamp, filename) entry to the file_map dataset in settings.h5.
+    """
+    settings_h5_path = Path(settings_h5_path)
+    if not settings_h5_path.exists():
+        raise FileNotFoundError(f"settings.h5 not found at {settings_h5_path}")
+
+    # Convert timestamp to POSIX float if datetime-like
+    if not isinstance(timestamp, (float, int)):
+        timestamp = pd.Timestamp(timestamp).timestamp()
+
+    # Structured dtype compatible with HDF5
+    dt = np.dtype([
+        ("timestamp", "f8"),
+        ("filename", h5py.string_dtype(encoding='utf-8'))
+    ])
+
+    # Create new entry
+    new_entry = np.array([(timestamp, str(filename))], dtype=dt)
+
+    with h5py.File(settings_h5_path, "a") as f:
+        if "file_map" in f:
+            # Read existing entries and ensure correct dtype
+            old_data = f["file_map"][...]
+            old_data = old_data.astype(dt)  # ensure dtype matches
+            file_map_array = np.concatenate([old_data, new_entry])
+            del f["file_map"]
+            f.create_dataset("file_map", data=file_map_array)
+            f["file_map"].attrs["total_files"] = len(file_map_array)
+        else:
+            f.create_dataset("file_map", data=new_entry)
+            f["file_map"].attrs["total_files"] = 1

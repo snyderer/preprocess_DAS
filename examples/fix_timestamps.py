@@ -2,6 +2,7 @@ from pathlib import Path
 import h5py
 import pandas as pd
 import numpy as np
+from preprocess_DAS import data_io as io
 
 def fix_timestamp_in_chunk(filepath):
     with h5py.File(filepath, 'r+') as f:  # r+ = read/write without truncating the file
@@ -48,5 +49,13 @@ def fix_all_timestamps_in_dir(directory):
     for file in chunk_files:
         fix_timestamp_in_chunk(file)
 
-# Usage
-fix_all_timestamps_in_dir(r"F:\ooi_optasense_north_c2_full")
+# === Example: add timestamps and filename for file_map to a settings.h5 ===
+def add_file_map_to_settings(directory):
+    settings_h5_path = Path(directory) / 'settings.h5'
+    io.rebuild_file_map_h5(settings_h5_path, directory)
+
+# Fix timestamps in each h5 file:
+# fix_all_timestamps_in_dir(r"F:\ooi_optasense_north_c2_full")
+
+# Add file mapping timestamps in settings.h5
+add_file_map_to_settings(r"D:\ooi_optasense_north_c3_full")
