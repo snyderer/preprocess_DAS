@@ -539,41 +539,50 @@ def rebuild_file_map_h5(settings_h5_path, chunks_dir):
     if not settings_h5_path.exists():
         raise FileNotFoundError(f"settings.h5 not found at {settings_h5_path}")
 
-    # Build structured array for file_map
-    chunk_files = sorted(chunks_dir.glob("*.h5"))
+    # Structured dtype compatible with HDF5
+    dt = np.dtype([
+        ("timestamp", "f8"),  # float64 POSIX seconds
+        ("filename", h5py.string_dtype(encoding='utf-8'))  # variable-length UTF8
+    ])
+
+    # Build file_map entries
     file_map_entries = []
-    for filepath in chunk_files:
+    for filepath in sorted(chunks_dir.glob("*.h5")):
         if filepath.name == "settings.h5":
             continue
         try:
             with h5py.File(filepath, "r") as f:
-                ts = f["timestamp"][()]  # POSIX seconds
+                ts = f["timestamp"][()]  # float POSIX timestamp
             file_map_entries.append(
-                (float(ts), filepath.name)
+                (float(ts), str(filepath.name))
             )
         except Exception as e:
             print(f"[WARNING] Could not read {filepath}: {e}")
 
-    # Create structured numpy array
-    dt = np.dtype([
-        ("timestamp", "f8"),  # float64 POSIX timestamp
-        ("filename", h5py.string_dtype(encoding='utf-8'))
-    ])
+    # Create NumPy structured array with correct dtype
     file_map_array = np.array(file_map_entries, dtype=dt)
 
-    # Write to settings.h5
+    # Write to HDF5
     with h5py.File(settings_h5_path, "a") as f:
         if "file_map" in f:
-            del f["file_map"]  # remove old
+            del f["file_map"]  # remove old dataset
         f.create_dataset("file_map", data=file_map_array)
         f["file_map"].attrs["total_files"] = len(file_map_array)
 
     print(f"[SETTINGS] Rebuilt file_map with {len(file_map_array)} entries in {settings_h5_path}")
 
-
 def append_file_map_h5(settings_h5_path, timestamp, filename):
     """
     Append a single (timestamp, filename) entry to the file_map dataset in settings.h5.
+    
+    Parameters
+    ----------
+    settings_h5_path : str or Path
+        Path to settings.h5
+    timestamp : datetime or float
+        POSIX time (seconds) or datetime object
+    filename : str
+        Chunk file name
     """
     settings_h5_path = Path(settings_h5_path)
     if not settings_h5_path.exists():
@@ -585,18 +594,16 @@ def append_file_map_h5(settings_h5_path, timestamp, filename):
 
     # Structured dtype compatible with HDF5
     dt = np.dtype([
-        ("timestamp", "f8"),
-        ("filename", h5py.string_dtype(encoding='utf-8'))
+        ("timestamp", "f8"),  # float64 POSIX seconds
+        ("filename", h5py.string_dtype(encoding='utf-8'))  # variable-length UTF8
     ])
 
-    # Create new entry
+    # Ensure filename is string
     new_entry = np.array([(timestamp, str(filename))], dtype=dt)
 
     with h5py.File(settings_h5_path, "a") as f:
         if "file_map" in f:
-            # Read existing entries and ensure correct dtype
-            old_data = f["file_map"][...]
-            old_data = old_data.astype(dt)  # ensure dtype matches
+            old_data = f["file_map"][...].astype(dt)
             file_map_array = np.concatenate([old_data, new_entry])
             del f["file_map"]
             f.create_dataset("file_map", data=file_map_array)
