@@ -521,6 +521,129 @@ def load_rehydrate_preprocessed_h5(filepath, settings_data = None, return_format
         k = np.fft.fftshift(np.fft.fftfreq(data.shape[0], d=settings_data['processing_settings']['dx']))
         return data, f, k, timestamp
     
+def update_rehydration_info_h5(settings_h5_path, sample_nonzeros, sample_shape, f_axis, k_axis):
+    """
+    Update only the rehydration_info and axes datasets in an existing settings.h5 file.
+
+    Parameters
+    ----------
+    settings_h5_path : str or Path
+        Path to the existing settings.h5 file
+    sample_nonzeros : np.ndarray
+        Boolean mask template for rehydration
+    sample_shape : tuple
+        Target shape after interpolation (nx, nt)
+    f_axis : np.ndarray
+        Frequency axis
+    k_axis : np.ndarray
+        Wavenumber axis
+    """
+    settings_h5_path = Path(settings_h5_path)
+
+    if not settings_h5_path.exists():
+        raise FileNotFoundError(f"settings.h5 not found at {settings_h5_path}")
+
+    with h5py.File(settings_h5_path, "a") as f:
+        # --- Update rehydration_info group ---
+        if "rehydration_info" in f:
+            del f["rehydration_info"]  # Remove old group
+        rehyd_grp = f.create_group("rehydration_info")
+        rehyd_grp.create_dataset("nonzeros_mask", data=sample_nonzeros.astype(bool),
+                                 compression='gzip', compression_opts=9)
+        rehyd_grp.create_dataset("target_shape", data=np.array(sample_shape))
+        rehyd_grp.attrs["description"] = "Template for rehydrating processed chunks"
+
+        # --- Update axes group ---
+        if "axes" in f:
+            del f["axes"]
+        axes_grp = f.create_group("axes")
+        axes_grp.create_dataset("frequency", data=f_axis, compression='gzip')
+        axes_grp["frequency"].attrs["units"] = "Hz"
+        axes_grp.create_dataset("wavenumber", data=k_axis, compression='gzip')
+        axes_grp["wavenumber"].attrs["units"] = "1/m"
+
+    print(f"[SETTINGS] Updated rehydration_info and axes in {settings_h5_path}")
+
+def rebuild_settings_h5_from_chunks(settings_h5_path, chunks_dir, metadata, processing_settings, dx, fs, fk_mask_params):
+    """
+    Build a settings.h5 file from existing processed chunks.
+
+    Parameters
+    ----------
+    settings_h5_path : str or Path
+        Where to save settings.h5
+    chunks_dir : str or Path
+        Directory containing processed chunk .h5 files
+    metadata : dict
+        Original metadata from acquisition
+    processing_settings : dict
+        Processing settings used in the run
+    dx, fs : float
+        Spatial sampling interval and sample rate
+    fk_mask_params : dict
+        Parameters needed to create the FK mask, e.g.:
+        {
+            'cs_min': 1300,
+            'cp_min': 1460,
+            'cp_max': 6000,
+            'cs_max': 7000,
+            'f_min': 15,
+            'f_max': 90
+        }
+    """
+    settings_h5_path = Path(settings_h5_path)
+    chunks_dir = Path(chunks_dir)
+
+    # Gather file timestamps + names
+    file_timestamps = []
+    file_names = []
+    chunk_files = sorted(chunks_dir.glob("*.h5"))
+    for filepath in chunk_files:
+        if filepath.name == "settings.h5":
+            continue
+        with h5py.File(filepath, "r") as f:
+            ts = f["timestamp"][()]  # POSIX seconds
+        file_timestamps.append(pd.Timestamp.fromtimestamp(ts))
+        file_names.append(filepath.name)
+
+    if len(chunk_files) == 0:
+        raise RuntimeError("No chunk files found to build settings.h5")
+
+    # Load first chunk to build rehydration info
+    first_chunk = chunk_files[0]
+    fk_dehyd, timestamp = None, None
+    with h5py.File(first_chunk, "r") as f:
+        fk_dehyd = f["fk_dehyd"][...]
+        timestamp = f["timestamp"][()]
+    
+    # Rehydrate to get shape/nonzeros mask
+    # For this we need the mask used during dehydration
+    # If you know fk_mask_params and original grid sizes, you can recreate it
+    dummy_trace = np.zeros((int(metadata["nx"]), int(processing_settings["twin_sec"]*metadata["fs"])))
+    Dfk, f_axis, k_axis = df.fk_interpolate(dummy_trace, metadata["dx"], metadata["fs"],
+                                            processing_settings["dx"], processing_settings["fs"],
+                                            output_format='fk', pad=0, time_window_s=processing_settings["twin_sec"])
+    
+    fk_mask = df.create_fk_mask(Dfk.shape, processing_settings["dx"], processing_settings["fs"], 
+        fk_mask_params['cs_min'], fk_mask_params['cp_min'], fk_mask_params['cp_max'], fk_mask_params['cs_max'], 
+        fk_mask_params['f_min'], fk_mask_params['f_max'])
+   
+    sample_nonzeros = fk_mask.astype(bool)
+    sample_shape = (Dfk.shape[0], (Dfk.shape[1]-1)*2)  # nt from nf
+
+    # Save settings.h5
+    save_settings_h5(
+        settings_h5_path,
+        metadata,
+        processing_settings,
+        sample_nonzeros,
+        sample_shape,
+        f_axis,
+        k_axis,
+        file_timestamps,
+        file_names
+    )
+
 def rebuild_file_map_h5(settings_h5_path, chunks_dir):
     """
     Scan all chunk .h5 files in chunks_dir and write file_map dataset
@@ -611,3 +734,4 @@ def append_file_map_h5(settings_h5_path, timestamp, filename):
         else:
             f.create_dataset("file_map", data=new_entry)
             f["file_map"].attrs["total_files"] = 1
+

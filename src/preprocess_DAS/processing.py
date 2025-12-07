@@ -174,7 +174,9 @@ def process_directory(input_dir, output_dir, interrogator, settings,
                 sample_shape = shape
                 if verbose:
                     print(f"Template stored: shape={shape}, nonzeros={np.sum(nonzeros)}")
-
+                # update the settings.h5 to save mask:
+                io.update_rehydration_info_h5(settings_h5_path, sample_nonzeros, sample_shape, f_axis, k_axis)
+            
             # Save chunk
             chunk_filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}.h5"
             outfile = output_dir / chunk_filename

@@ -58,4 +58,8 @@ def add_file_map_to_settings(directory):
 # fix_all_timestamps_in_dir(r"F:\ooi_optasense_north_c2_full")
 
 # Add file mapping timestamps in settings.h5
-add_file_map_to_settings(r"D:\ooi_optasense_north_c3_full")
+# add_file_map_to_settings(r"D:\ooi_optasense_north_c3_full")
+
+directory = r"D:\ooi_optasense_north_c3_full"
+settings_filepath = r"D:\tmp\ooi_optasense_north_c3_full\settings.h5"
+io.rebuild_file_map_h5(settings_filepath, directory)
