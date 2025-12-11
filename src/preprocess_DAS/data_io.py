@@ -23,10 +23,10 @@ class Loader:
     """
 
     def __init__(self, input_dir, interrogator='optasense',
-                 start_distance_km=-40.01, cable_span_km=40,
-                 use_full_cable=False, dx_in_m=None,
-                 time_window_s=30, start_file_index=0,
-                 end_file_index=None, bandpass_filter=None):
+                start_distance_km=-40.01, cable_span_km=40,
+                use_full_cable=False, dx_in_m=None,
+                time_window_s=30, start_file_index=0,
+                end_file_index=None, bandpass_filter=None):
 
         self.input_dir = Path(input_dir)
         self.interrogator = interrogator
@@ -35,6 +35,7 @@ class Loader:
         self.end_file_index = end_file_index
         self.bandpass_filter = bandpass_filter
 
+        # Load file list and metadata
         self._get_file_list()
         self._load_metadata()
         self._setup_channels(start_distance_km, cable_span_km, dx_in_m)
@@ -50,16 +51,30 @@ class Loader:
         # ---- Decide whether to use buffer ----
         raw_samples_per_window = self.metadata['fs'] * self.time_window_s
         self.samples_per_window = int(round(raw_samples_per_window))
-        self.use_buffer = not np.isclose(raw_samples_per_window, self.samples_per_window)
 
-        # Also check that the first file duration matches desired window:
+        # Default to buffer mode unless file length is exactly output window length
+        self.use_buffer = True
         try:
-            nt_first = self.metadata.get('nt', None)  # # of samples in first file
-            if nt_first is not None and nt_first != self.samples_per_window:
+            trace, tx, dist, timestamp = dh.load_das_data(
+                self.file_list[0], self.selected_channels, self.metadata, self.interrogator
+            )
+            nt_first = trace.shape[1]
+
+            if nt_first == self.samples_per_window:
+                # File matches desired window exactly — safe for no-buffer mode
+                self.use_buffer = False
+            elif nt_first < self.samples_per_window:
+                # File shorter than desired window — must stitch multiple files
                 self.use_buffer = True
-        except Exception:
+            elif nt_first > self.samples_per_window:
+                # File longer than desired window — safer to use buffer slicing
+                self.use_buffer = True
+
+        except Exception as e:
+            print(f"[Loader] Could not determine actual file length; enabling buffer mode. Reason: {e}")
             self.use_buffer = True
 
+        # Handle padding setup
         if self.use_buffer:
             self._init_padding_and_window()
         else:
@@ -143,6 +158,12 @@ class Loader:
     def _get_next_whole_file_chunk(self):
         if self.file_index >= len(self.file_list):
             return None
+        if trace.shape[1] != self.samples_per_window:
+            # mismatch between true file length and expected file length
+            raise RuntimeError(
+                f"[Loader] No-buffer mode error: file {self.file_list[self.file_index]} "
+                f"has {trace.shape[1]} samples, expected {self.samples_per_window}."
+            )
         trace, tx, dist, timestamp = dh.load_das_data(
             self.file_list[self.file_index], self.selected_channels, self.metadata, self.interrogator
         )
@@ -165,7 +186,6 @@ class Loader:
             "is_last_chunk": is_last_chunk
         }
 
-    # Buffer mode: original continuous chunk logic
     def _get_next_continuous_chunk(self):
         fs = self.metadata['fs']
 

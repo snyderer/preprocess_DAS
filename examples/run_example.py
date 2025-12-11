@@ -5,7 +5,8 @@ from preprocess_DAS import processing
 
 # dataset = 'medsea_full'
 # dataset = 'ooi_optasense_north_c3_full'
-dataset = 'ooi_optasense_south_c1_full'
+# dataset = 'ooi_optasense_south_c1_full'
+dataset = 'svalbard_full'
 mode = 'processing'    # processing or testing
 
 settings = {
