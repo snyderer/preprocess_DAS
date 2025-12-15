@@ -23,10 +23,10 @@ class Loader:
     """
 
     def __init__(self, input_dir, interrogator='optasense',
-                 start_distance_km=-40.01, cable_span_km=40,
-                 use_full_cable=False, dx_in_m=None,
-                 time_window_s=30, start_file_index=0,
-                 end_file_index=None, bandpass_filter=None):
+                start_distance_km=-40.01, cable_span_km=40,
+                use_full_cable=False, dx_in_m=None,
+                time_window_s=30, start_file_index=0,
+                end_file_index=None, bandpass_filter=None):
 
         self.input_dir = Path(input_dir)
         self.interrogator = interrogator
@@ -35,6 +35,7 @@ class Loader:
         self.end_file_index = end_file_index
         self.bandpass_filter = bandpass_filter
 
+        # Load file list and metadata
         self._get_file_list()
         self._load_metadata()
         self._setup_channels(start_distance_km, cable_span_km, dx_in_m)
@@ -50,16 +51,30 @@ class Loader:
         # ---- Decide whether to use buffer ----
         raw_samples_per_window = self.metadata['fs'] * self.time_window_s
         self.samples_per_window = int(round(raw_samples_per_window))
-        self.use_buffer = not np.isclose(raw_samples_per_window, self.samples_per_window)
 
-        # Also check that the first file duration matches desired window:
+        # Default to buffer mode unless file length is exactly output window length
+        self.use_buffer = True
         try:
-            nt_first = self.metadata.get('nt', None)  # # of samples in first file
-            if nt_first is not None and nt_first != self.samples_per_window:
+            trace, tx, dist, timestamp = dh.load_das_data(
+                self.file_list[0], self.selected_channels, self.metadata, self.interrogator
+            )
+            nt_first = trace.shape[1]
+
+            if nt_first == self.samples_per_window:
+                # File matches desired window exactly — safe for no-buffer mode
+                self.use_buffer = False
+            elif nt_first < self.samples_per_window:
+                # File shorter than desired window — must stitch multiple files
                 self.use_buffer = True
-        except Exception:
+            elif nt_first > self.samples_per_window:
+                # File longer than desired window — safer to use buffer slicing
+                self.use_buffer = True
+
+        except Exception as e:
+            print(f"[Loader] Could not determine actual file length; enabling buffer mode. Reason: {e}")
             self.use_buffer = True
 
+        # Handle padding setup
         if self.use_buffer:
             self._init_padding_and_window()
         else:
@@ -146,6 +161,12 @@ class Loader:
         trace, tx, dist, timestamp = dh.load_das_data(
             self.file_list[self.file_index], self.selected_channels, self.metadata, self.interrogator
         )
+        if trace.shape[1] != self.samples_per_window:
+            # mismatch between true file length and expected file length
+            raise RuntimeError(
+                f"[Loader] No-buffer mode error: file {self.file_list[self.file_index]} "
+                f"has {trace.shape[1]} samples, expected {self.samples_per_window}."
+            )
         if self.filter_sos is not None:
             trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
         
@@ -165,7 +186,6 @@ class Loader:
             "is_last_chunk": is_last_chunk
         }
 
-    # Buffer mode: original continuous chunk logic
     def _get_next_continuous_chunk(self):
         fs = self.metadata['fs']
 
@@ -521,6 +541,129 @@ def load_rehydrate_preprocessed_h5(filepath, settings_data = None, return_format
         k = np.fft.fftshift(np.fft.fftfreq(data.shape[0], d=settings_data['processing_settings']['dx']))
         return data, f, k, timestamp
     
+def update_rehydration_info_h5(settings_h5_path, sample_nonzeros, sample_shape, f_axis, k_axis):
+    """
+    Update only the rehydration_info and axes datasets in an existing settings.h5 file.
+
+    Parameters
+    ----------
+    settings_h5_path : str or Path
+        Path to the existing settings.h5 file
+    sample_nonzeros : np.ndarray
+        Boolean mask template for rehydration
+    sample_shape : tuple
+        Target shape after interpolation (nx, nt)
+    f_axis : np.ndarray
+        Frequency axis
+    k_axis : np.ndarray
+        Wavenumber axis
+    """
+    settings_h5_path = Path(settings_h5_path)
+
+    if not settings_h5_path.exists():
+        raise FileNotFoundError(f"settings.h5 not found at {settings_h5_path}")
+
+    with h5py.File(settings_h5_path, "a") as f:
+        # --- Update rehydration_info group ---
+        if "rehydration_info" in f:
+            del f["rehydration_info"]  # Remove old group
+        rehyd_grp = f.create_group("rehydration_info")
+        rehyd_grp.create_dataset("nonzeros_mask", data=sample_nonzeros.astype(bool),
+                                 compression='gzip', compression_opts=9)
+        rehyd_grp.create_dataset("target_shape", data=np.array(sample_shape))
+        rehyd_grp.attrs["description"] = "Template for rehydrating processed chunks"
+
+        # --- Update axes group ---
+        if "axes" in f:
+            del f["axes"]
+        axes_grp = f.create_group("axes")
+        axes_grp.create_dataset("frequency", data=f_axis, compression='gzip')
+        axes_grp["frequency"].attrs["units"] = "Hz"
+        axes_grp.create_dataset("wavenumber", data=k_axis, compression='gzip')
+        axes_grp["wavenumber"].attrs["units"] = "1/m"
+
+    print(f"[SETTINGS] Updated rehydration_info and axes in {settings_h5_path}")
+
+def rebuild_settings_h5_from_chunks(settings_h5_path, chunks_dir, metadata, processing_settings, dx, fs, fk_mask_params):
+    """
+    Build a settings.h5 file from existing processed chunks.
+
+    Parameters
+    ----------
+    settings_h5_path : str or Path
+        Where to save settings.h5
+    chunks_dir : str or Path
+        Directory containing processed chunk .h5 files
+    metadata : dict
+        Original metadata from acquisition
+    processing_settings : dict
+        Processing settings used in the run
+    dx, fs : float
+        Spatial sampling interval and sample rate
+    fk_mask_params : dict
+        Parameters needed to create the FK mask, e.g.:
+        {
+            'cs_min': 1300,
+            'cp_min': 1460,
+            'cp_max': 6000,
+            'cs_max': 7000,
+            'f_min': 15,
+            'f_max': 90
+        }
+    """
+    settings_h5_path = Path(settings_h5_path)
+    chunks_dir = Path(chunks_dir)
+
+    # Gather file timestamps + names
+    file_timestamps = []
+    file_names = []
+    chunk_files = sorted(chunks_dir.glob("*.h5"))
+    for filepath in chunk_files:
+        if filepath.name == "settings.h5":
+            continue
+        with h5py.File(filepath, "r") as f:
+            ts = f["timestamp"][()]  # POSIX seconds
+        file_timestamps.append(pd.Timestamp.fromtimestamp(ts))
+        file_names.append(filepath.name)
+
+    if len(chunk_files) == 0:
+        raise RuntimeError("No chunk files found to build settings.h5")
+
+    # Load first chunk to build rehydration info
+    first_chunk = chunk_files[0]
+    fk_dehyd, timestamp = None, None
+    with h5py.File(first_chunk, "r") as f:
+        fk_dehyd = f["fk_dehyd"][...]
+        timestamp = f["timestamp"][()]
+    
+    # Rehydrate to get shape/nonzeros mask
+    # For this we need the mask used during dehydration
+    # If you know fk_mask_params and original grid sizes, you can recreate it
+    dummy_trace = np.zeros((int(metadata["nx"]), int(processing_settings["twin_sec"]*metadata["fs"])))
+    Dfk, f_axis, k_axis = df.fk_interpolate(dummy_trace, metadata["dx"], metadata["fs"],
+                                            processing_settings["dx"], processing_settings["fs"],
+                                            output_format='fk', pad=0, time_window_s=processing_settings["twin_sec"])
+    
+    fk_mask = df.create_fk_mask(Dfk.shape, processing_settings["dx"], processing_settings["fs"], 
+        fk_mask_params['cs_min'], fk_mask_params['cp_min'], fk_mask_params['cp_max'], fk_mask_params['cs_max'], 
+        fk_mask_params['f_min'], fk_mask_params['f_max'])
+   
+    sample_nonzeros = fk_mask.astype(bool)
+    sample_shape = (Dfk.shape[0], (Dfk.shape[1]-1)*2)  # nt from nf
+
+    # Save settings.h5
+    save_settings_h5(
+        settings_h5_path,
+        metadata,
+        processing_settings,
+        sample_nonzeros,
+        sample_shape,
+        f_axis,
+        k_axis,
+        file_timestamps,
+        file_names
+    )
+
 def rebuild_file_map_h5(settings_h5_path, chunks_dir):
     """
     Scan all chunk .h5 files in chunks_dir and write file_map dataset
@@ -539,42 +682,42 @@ def rebuild_file_map_h5(settings_h5_path, chunks_dir):
     if not settings_h5_path.exists():
         raise FileNotFoundError(f"settings.h5 not found at {settings_h5_path}")
 
-    # Build structured array for file_map
-    chunk_files = sorted(chunks_dir.glob("*.h5"))
+    # Structured dtype compatible with HDF5
+    dt = np.dtype([
+        ("timestamp", "f8"),  # float64 POSIX seconds
+        ("filename", h5py.string_dtype(encoding='utf-8'))  # variable-length UTF8
+    ])
+
+    # Build file_map entries
     file_map_entries = []
-    for filepath in chunk_files:
+    for filepath in sorted(chunks_dir.glob("*.h5")):
         if filepath.name == "settings.h5":
             continue
         try:
             with h5py.File(filepath, "r") as f:
-                ts = f["timestamp"][()]  # POSIX seconds
+                ts = f["timestamp"][()]  # float POSIX timestamp
             file_map_entries.append(
-                (float(ts), filepath.name)
+                (float(ts), str(filepath.name))
             )
         except Exception as e:
             print(f"[WARNING] Could not read {filepath}: {e}")
 
-    # Create structured numpy array
-    dt = np.dtype([
-        ("timestamp", "f8"),  # float64 POSIX timestamp
-        ("filename", h5py.string_dtype(encoding='utf-8'))
-    ])
+    # Create NumPy structured array with correct dtype
     file_map_array = np.array(file_map_entries, dtype=dt)
 
-    # Write to settings.h5
+    # Write to HDF5
     with h5py.File(settings_h5_path, "a") as f:
         if "file_map" in f:
-            del f["file_map"]  # remove old
+            del f["file_map"]  # remove old dataset
         f.create_dataset("file_map", data=file_map_array)
         f["file_map"].attrs["total_files"] = len(file_map_array)
 
     print(f"[SETTINGS] Rebuilt file_map with {len(file_map_array)} entries in {settings_h5_path}")
 
-
 def append_file_map_h5(settings_h5_path, timestamp, filename):
     """
     Append a single (timestamp, filename) entry to the file_map dataset in settings.h5.
-
+    
     Parameters
     ----------
     settings_h5_path : str or Path
@@ -588,19 +731,22 @@ def append_file_map_h5(settings_h5_path, timestamp, filename):
     if not settings_h5_path.exists():
         raise FileNotFoundError(f"settings.h5 not found at {settings_h5_path}")
 
-    # Convert timestamp to POSIX float if it's a datetime
+    # Convert timestamp to POSIX float if datetime-like
     if not isinstance(timestamp, (float, int)):
         timestamp = pd.Timestamp(timestamp).timestamp()
 
-    with h5py.File(settings_h5_path, "a") as f:
-        dt = np.dtype([
-            ("timestamp", "f8"),
-            ("filename", h5py.string_dtype(encoding='utf-8'))
-        ])
-        new_entry = np.array([(timestamp, filename)], dtype=dt)
+    # Structured dtype compatible with HDF5
+    dt = np.dtype([
+        ("timestamp", "f8"),  # float64 POSIX seconds
+        ("filename", h5py.string_dtype(encoding='utf-8'))  # variable-length UTF8
+    ])
 
+    # Ensure filename is string
+    new_entry = np.array([(timestamp, str(filename))], dtype=dt)
+
+    with h5py.File(settings_h5_path, "a") as f:
         if "file_map" in f:
-            old_data = f["file_map"][...]
+            old_data = f["file_map"][...].astype(dt)
             file_map_array = np.concatenate([old_data, new_entry])
             del f["file_map"]
             f.create_dataset("file_map", data=file_map_array)
@@ -608,3 +754,4 @@ def append_file_map_h5(settings_h5_path, timestamp, filename):
         else:
             f.create_dataset("file_map", data=new_entry)
             f["file_map"].attrs["total_files"] = 1
+

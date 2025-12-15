@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 class Loader:
     """
     Continuous DAS data loader with optional buffer, edge padding, drift-free chunking.
-    Now has automatic 'no-buffer' mode if file duration exactly matches twin_sec.
+    Fixed to properly handle files longer than the desired window duration.
     """
 
     def __init__(self, input_dir, interrogator='optasense',
@@ -48,31 +48,25 @@ class Loader:
             self.bandpass_filter[1][1] = int(np.floor(self.metadata['fs'] / 2) - 2)
         self._setup_filter()
 
-        # ---- Decide whether to use buffer ----
+        # Calculate expected samples per window
         raw_samples_per_window = self.metadata['fs'] * self.time_window_s
         self.samples_per_window = int(round(raw_samples_per_window))
 
-        # Default to buffer mode unless file length is exactly output window length
+        # Always use buffer mode for proper continuous processing
+        # The only exception is if we want to process exactly one file with exact duration match
         self.use_buffer = True
-        try:
-            trace, tx, dist, timestamp = dh.load_das_data(
-                self.file_list[0], self.selected_channels, self.metadata, self.interrogator
-            )
-            nt_first = trace.shape[1]
-
-            if nt_first == self.samples_per_window:
-                # File matches desired window exactly — safe for no-buffer mode
-                self.use_buffer = False
-            elif nt_first < self.samples_per_window:
-                # File shorter than desired window — must stitch multiple files
-                self.use_buffer = True
-            elif nt_first > self.samples_per_window:
-                # File longer than desired window — safer to use buffer slicing
-                self.use_buffer = True
-
-        except Exception as e:
-            print(f"[Loader] Could not determine actual file length; enabling buffer mode. Reason: {e}")
-            self.use_buffer = True
+        
+        # Check if we have exactly one file that matches our window duration exactly
+        if len(self.file_list) == 1:
+            try:
+                trace, tx, dist, timestamp = dh.load_das_data(
+                    self.file_list[0], self.selected_channels, self.metadata, self.interrogator
+                )
+                nt_first = trace.shape[1]
+                if nt_first == self.samples_per_window:
+                    self.use_buffer = False
+            except Exception:
+                pass  # Fall back to buffer mode
 
         # Handle padding setup
         if self.use_buffer:
@@ -91,7 +85,114 @@ class Loader:
         self.dist_axis = None
         self.window_number = 0
 
-    # ------------------------------------------------------------
+    def _load_file_data(self, file_index):
+        """Load a file and append to buffer"""
+        if file_index >= len(self.file_list):
+            return False
+            
+        trace, tx, dist, timestamp = dh.load_das_data(
+            self.file_list[file_index], self.selected_channels, self.metadata, self.interrogator
+        )
+        trace = trace.astype(np.float32, copy=False)
+        if self.filter_sos is not None:
+            trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
+            
+        if self.buffer is None:
+            self.buffer = trace
+            self.buffer_time_axis = tx
+            self.buffer_start_timestamp = timestamp
+            self.dist_axis = dist
+            self.global_start_timestamp = timestamp
+            self.global_buffer_start_sample = 0
+        else:
+            self.buffer = np.concatenate((self.buffer, trace), axis=1)
+            self.buffer_time_axis = np.concatenate((self.buffer_time_axis, tx))
+        return True
+
+    def _get_next_continuous_chunk(self):
+        """Extract next chunk from continuous buffer"""
+        fs = self.metadata['fs']
+
+        # Initialize buffer if needed
+        if self.buffer is None:
+            while self.file_index < len(self.file_list):
+                if self._load_file_data(self.file_index):
+                    self.file_index += 1
+                    break
+                else:
+                    self.file_index += 1
+            if self.buffer is None:
+                return None
+
+        # Calculate sample positions for this window
+        start_sample = self.window_number * self.samples_per_window
+        end_sample = start_sample + self.samples_per_window + self.pad_before + self.pad_after
+
+        # Convert to relative positions in buffer
+        rel_start = start_sample - self.global_buffer_start_sample
+        rel_end = end_sample - self.global_buffer_start_sample
+
+        # Load more files if needed
+        while rel_end > self.buffer.shape[1] and self.file_index < len(self.file_list):
+            if not self._load_file_data(self.file_index):
+                break
+            self.file_index += 1
+
+        # Check if we have enough data
+        if rel_start >= self.buffer.shape[1]:
+            return None
+        
+        # Adjust end if we've reached the end of available data
+        rel_end = min(rel_end, self.buffer.shape[1])
+        
+        # Check if we have enough samples for a complete window
+        available_samples = rel_end - rel_start - self.pad_before - self.pad_after
+        if available_samples < self.samples_per_window:
+            # Not enough data for a complete window
+            if self.file_index >= len(self.file_list):
+                # No more files to load, this is the end
+                return None
+            else:
+                # This shouldn't happen if we loaded files correctly
+                print(f"Warning: Insufficient data for window {self.window_number}")
+                return None
+
+        # Extract chunk
+        chunk_trace = self.buffer[:, rel_start:rel_end]
+        chunk_time_axis = self.buffer_time_axis[rel_start:rel_end]
+        chunk_timestamp = self.global_start_timestamp + pd.Timedelta(seconds=start_sample / fs)
+
+        # Advance to next window
+        self.window_number += 1
+
+        # Clean up buffer - keep data needed for next window
+        next_start_sample = self.window_number * self.samples_per_window
+        retain_from_absolute = max(0, next_start_sample - self.pad_before)
+        drop_count = retain_from_absolute - self.global_buffer_start_sample
+        
+        if drop_count > 0:
+            self.buffer = self.buffer[:, drop_count:]
+            self.buffer_time_axis = self.buffer_time_axis[drop_count:]
+            self.global_buffer_start_sample = retain_from_absolute
+
+        # Detect last chunk
+        is_last_chunk = False
+        if self.file_index >= len(self.file_list) and rel_end >= self.buffer.shape[1]:
+            is_last_chunk = True
+
+        return {
+            "trace": chunk_trace,
+            "time_axis": chunk_time_axis,
+            "distance_axis": self.dist_axis,
+            "timestamp": chunk_timestamp,
+            "channels": self.selected_channels,
+            "filtered": self.filter_sos is not None,
+            "pad_before": self.pad_before,
+            "pad_after": self.pad_after,
+            "is_last_chunk": is_last_chunk
+        }
+
+    # Keep all other methods the same...
     def _get_file_list(self):
         extensions = ['.h5', '.hdf5', '.tdms']
         self.file_list = []
@@ -132,129 +233,10 @@ class Loader:
         raw_samples_per_window = fs * self.time_window_s
         self.samples_per_window = int(np.floor(raw_samples_per_window))
         fractional = raw_samples_per_window - self.samples_per_window
-        extra_pad_samples = int(np.ceil(fractional) + 1)  # at least 1 sample
+        extra_pad_samples = int(np.ceil(fractional) + 1)
         self.pad_before = extra_pad_samples
         self.pad_after = extra_pad_samples
 
-    def _load_file_data(self, file_index):
-        trace, tx, dist, timestamp = dh.load_das_data(
-            self.file_list[file_index], self.selected_channels, self.metadata, self.interrogator
-        )
-        trace = trace.astype(np.float32, copy=False)
-        if self.filter_sos is not None:
-            trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
-        if self.buffer is None:
-            self.buffer = trace
-            self.buffer_time_axis = tx
-            self.buffer_start_timestamp = timestamp
-            self.dist_axis = dist
-        else:
-            self.buffer = np.concatenate((self.buffer, trace), axis=1)
-            self.buffer_time_axis = np.concatenate((self.buffer_time_axis, tx))
-        return True
-
-    # ------------------------------------------------------------
-    # No-buffer mode: just read one file and return as a chunk
-    def _get_next_whole_file_chunk(self):
-        if self.file_index >= len(self.file_list):
-            return None
-        if trace.shape[1] != self.samples_per_window:
-            # mismatch between true file length and expected file length
-            raise RuntimeError(
-                f"[Loader] No-buffer mode error: file {self.file_list[self.file_index]} "
-                f"has {trace.shape[1]} samples, expected {self.samples_per_window}."
-            )
-        trace, tx, dist, timestamp = dh.load_das_data(
-            self.file_list[self.file_index], self.selected_channels, self.metadata, self.interrogator
-        )
-        if self.filter_sos is not None:
-            trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
-        
-        # Check if this chunk is the very last one
-        is_last_chunk = (self.file_index + 1 >= len(self.file_list))
-
-        self.file_index += 1
-        return {
-            "trace": trace,
-            "time_axis": tx,
-            "distance_axis": dist,
-            "timestamp": timestamp,
-            "channels": self.selected_channels,
-            "filtered": self.filter_sos is not None,
-            "pad_before": 0,
-            "pad_after": 0,
-            "is_last_chunk": is_last_chunk
-        }
-
-    def _get_next_continuous_chunk(self):
-        fs = self.metadata['fs']
-
-        if self.global_start_timestamp is None:
-            while self.file_index < len(self.file_list) and self.buffer is None:
-                if self._load_file_data(self.file_index):
-                    self.file_index += 1
-                else:
-                    self.file_index += 1
-            if self.buffer is None:
-                return None
-            self.global_start_timestamp = self.buffer_start_timestamp
-            self.global_buffer_start_sample = 0
-            self.window_number = 0
-
-        start_sample = self.window_number * self.samples_per_window
-        end_sample = start_sample + self.samples_per_window + self.pad_before + self.pad_after
-
-        rel_start = start_sample - self.global_buffer_start_sample
-        rel_end = end_sample - self.global_buffer_start_sample
-
-        while rel_end > self.buffer.shape[1]:
-            if self.file_index >= len(self.file_list):
-                if self.buffer.shape[1] > rel_start + self.samples_per_window:
-                    rel_end = min(rel_end, self.buffer.shape[1])
-                    break
-                else:
-                    return None
-            if self._load_file_data(self.file_index):
-                self.file_index += 1
-            else:
-                self.file_index += 1
-
-        if rel_start >= self.buffer.shape[1]:
-            return None
-
-        rel_end = min(rel_end, self.buffer.shape[1])
-
-        chunk_trace = self.buffer[:, rel_start:rel_end]
-        chunk_time_axis = self.buffer_time_axis[rel_start:rel_end]
-        chunk_timestamp = self.global_start_timestamp + pd.Timedelta(seconds=start_sample / fs)
-        self.window_number += 1
-
-        next_start_sample = self.window_number * self.samples_per_window
-        retain_from_absolute = max(0, next_start_sample - self.pad_before)
-        drop_count = retain_from_absolute - self.global_buffer_start_sample
-        if drop_count > 0:
-            self.buffer = self.buffer[:, drop_count:]
-            self.buffer_time_axis = self.buffer_time_axis[drop_count:]
-            self.global_buffer_start_sample = retain_from_absolute
-
-        # Detect last chunk: we're at end of files and rel_end == buffer length
-        is_last_chunk = False
-        if self.file_index >= len(self.file_list) and rel_end >= self.buffer.shape[1]:
-            is_last_chunk = True
-
-        return {
-            "trace": chunk_trace,
-            "time_axis": chunk_time_axis,
-            "distance_axis": self.dist_axis,
-            "timestamp": chunk_timestamp,
-            "channels": self.selected_channels,
-            "filtered": self.filter_sos is not None,
-            "pad_before": self.pad_before,
-            "pad_after": self.pad_after,
-            "is_last_chunk": is_last_chunk
-        }
-
-    # ------------------------------------------------------------
     def __iter__(self):
         self.file_index = 0
         self.buffer = None
@@ -274,6 +256,35 @@ class Loader:
         if chunk is None:
             raise StopIteration
         return chunk
+
+    def _get_next_whole_file_chunk(self):
+        """For the rare case of exact file duration match"""
+        if self.file_index >= len(self.file_list):
+            return None
+        trace, tx, dist, timestamp = dh.load_das_data(
+            self.file_list[self.file_index], self.selected_channels, self.metadata, self.interrogator
+        )
+        if trace.shape[1] != self.samples_per_window:
+            raise RuntimeError(
+                f"No-buffer mode error: file {self.file_list[self.file_index]} "
+                f"has {trace.shape[1]} samples, expected {self.samples_per_window}."
+            )
+        if self.filter_sos is not None:
+            trace = sp.sosfiltfilt(self.filter_sos, trace, axis=1)
+        
+        is_last_chunk = (self.file_index + 1 >= len(self.file_list))
+        self.file_index += 1
+        return {
+            "trace": trace,
+            "time_axis": tx,
+            "distance_axis": dist,
+            "timestamp": timestamp,
+            "channels": self.selected_channels,
+            "filtered": self.filter_sos is not None,
+            "pad_before": 0,
+            "pad_after": 0,
+            "is_last_chunk": is_last_chunk
+        }
     
 ################################ \ end of Loader class #########################################
 

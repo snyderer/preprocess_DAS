@@ -60,6 +60,13 @@ def add_file_map_to_settings(directory):
 # Add file mapping timestamps in settings.h5
 # add_file_map_to_settings(r"D:\ooi_optasense_north_c3_full")
 
-directory = r"D:\ooi_optasense_north_c3_full"
-settings_filepath = r"D:\tmp\ooi_optasense_north_c3_full\settings.h5"
-io.rebuild_file_map_h5(settings_filepath, directory)
+directory = r"F:\ooi_optasense_south_c1_full"
+settings_filepath = r"F:\ooi_optasense_south_c1_full\settings.h5"
+# io.rebuild_file_map_h5(settings_filepath, directory)
+
+# test the file map:
+settings_new = io.load_settings_preprocessed_h5(settings_filepath)
+settings_orig = io.load_settings_preprocessed_h5(directory + r"\settings_backup.h5")
+
+
+ok=1

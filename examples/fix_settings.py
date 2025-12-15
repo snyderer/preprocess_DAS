@@ -3,7 +3,7 @@ from das4whales import data_handle as dh
 import os
 
 interrogator='optasense'
-directory = r"D:\ooi_optasense_north_c3_full"
+directory = r"F:\ooi_optasense_south_c1_full"
 in_file = r"\\ccb-qnap.nas.ornith.cornell.edu\CCB\projects\2022_CLOCCB_OR_S1113\OOI\DASData\OptaSense\North_C3\North-C3-HF-P1kHz-GL30m-Sp2m_2021-11-02T000015Z.h5"
 metadata = dh.get_acquisition_parameters(in_file, interrogator=interrogator)
 processing_settings = {
